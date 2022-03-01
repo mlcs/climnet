@@ -1,0 +1,29 @@
+name: climnetenv
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - jupyter
+  - netcdf4
+  - python[version='>=3.8']
+  - pandas
+  - ipython
+  - xarray
+  - numpy=1.20.2
+  - networkit
+  - pot
+  - xlrd
+  - tqdm
+  - multiprocess
+  - mypy
+  - python-louvain
+  - networkx
+  - pip
+  - scipy
+  - joblib
+  - cartopy=0.18.0
+  - matplotlib=3.3.4
+  - ipywidgets
+  - numba
+  - seaborn
+  - scikit-learn
