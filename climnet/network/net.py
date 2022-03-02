@@ -12,7 +12,7 @@ from tqdm import tqdm
 import copy
 import climnet.network.link_bundles as lb
 import climnet.tsa.event_synchronization as es
-import climnet.grid.grid as grid
+import climnet.grid as grid
 from climnet.utils.statistic_utils import holm
 import climnet.utils.statistic_utils as sut
 import climnet.utils.time_utils as tu
