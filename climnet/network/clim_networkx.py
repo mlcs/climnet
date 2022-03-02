@@ -18,7 +18,7 @@ import os
 from tqdm import tqdm
 import multiprocessing as mpi
 from joblib import Parallel, delayed
-import climnet.grid.grid as grid
+import climnet.grid as grid
 import climnet.network.network_functions as nwf
 
 PATH = os.path.dirname(os.path.abspath(__file__))
