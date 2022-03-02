@@ -12,11 +12,14 @@ from tqdm import tqdm
 import copy
 import climnet.network.link_bundles as lb
 import climnet.tsa.event_synchronization as es
-import climnet.grid as grid
+import climnet.grid.grid as grid
 from climnet.utils.statistic_utils import holm
 import climnet.utils.statistic_utils as sut
-
+import climnet.utils.time_utils as tu
+import climnet.network.network_functions as nwf
+import climnet.utils.general_utils as gut
 from climnet.tsa import iaaft
+
 PATH = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -35,46 +38,43 @@ def load(dataset, fname):
     Net: climnet.net.BaseClimNet
         Climate network object.
     """
-    print(f'Load network: {fname}')
+    print(f"Load network: {fname}")
     with np.load(fname, allow_pickle=True) as data:
-        class_type = data['type'][0]
+        class_type = data["type"][0]
 
         # correlation based climate network
-        if class_type == 'correlation':
+        if class_type == "correlation":
             Net = CorrClimNet(
                 dataset,
-                corr_method=data['corr_method'][0],
-                confidence=data['confidence'][0],
-                stat_test=data['stat_test'][0],
-                significance_test=data['significance_test'][0],
+                corr_method=data["corr_method"][0],
+                confidence=data["confidence"][0],
+                stat_test=data["stat_test"][0],
+                significance_test=data["significance_test"][0],
             )
-            Net.corr = data['corr']
-            Net.pvalue = data['pvalue']
+            Net.corr = data["corr"]
+            Net.pvalue = data["pvalue"]
 
         # event synchronization network
-        elif class_type == 'evs':
-            if 'weighted' in list(data.keys()):
-                weighted = data['weighted'][0]
+        elif class_type == "evs":
+            if "weighted" in list(data.keys()):
+                weighted = data["weighted"][0]
             else:
                 weighted = False
-            Net = EventSyncClimNet(
-                dataset,
-                taumax=data['taumax'][0],
-                weighted=weighted
-            )
+            Net = EventSyncClimNet(dataset, taumax=data["taumax"][0], weighted=weighted)
             if Net.weighted:
-                corr = data['corr']
+                corr = data["corr"]
                 Net.corr = np.where(corr == np.inf, 0, corr)
         else:
             raise ValueError(f"Class type {class_type} not implemented!")
-        Net.adjacency = data['adjacency']
-        Net.lb = bool(data['lb'][0])
+        Net.adjacency = data["adjacency"]
+        Net.lb = bool(data["lb"][0])
 
         g_N = len(Net.adjacency)
         num_ds_nodes = len(Net.ds.indices_flat)
         if g_N != num_ds_nodes:
             raise ValueError(
-                f'Error network and dataset not of the same dimension net: {g_N} != ds {num_ds_nodes}!')
+                f"Error network and dataset not of the same dimension net: {g_N} != ds {num_ds_nodes}!"
+            )
     return Net
 
 
@@ -90,7 +90,7 @@ class BaseClimNet:
         self.ds = copy.deepcopy(dataset)
         self.lb = False
         self.adjacency = None
-        self.type = 'Base'
+        self.type = "Base"
         self.sparsity = None
 
     def create(self):
@@ -112,7 +112,7 @@ class BaseClimNet:
         bandwidth = self.obtain_kde_bandwidth(nn_points_bw=nn_points_bw)
         Z = lb.spherical_kde(link_coord, coord_rad, bandwidth)
 
-        return {'z': Z, 'link_coord': link_coord, 'all_link': all_link_idx_this_node}
+        return {"z": Z, "link_coord": link_coord, "all_link": all_link_idx_this_node}
 
     def obtain_kde_bandwidth(self, nn_points_bw=1):
         """KDE bandwidth is set to nn_points_bw*max_dist_of_points.
@@ -122,60 +122,68 @@ class BaseClimNet:
         nn_points_bw: int
             Number of next-neighbor points of KDE bandwidth.
         """
-        dist_eq = grid.degree2distance_equator(self.ds.grid_step, radius=grid.RADIUS_EARTH)
-        bandwidth = nn_points_bw * dist_eq/grid.RADIUS_EARTH
+        dist_eq = grid.degree2distance_equator(
+            self.ds.grid_step, radius=grid.RADIUS_EARTH
+        )
+        bandwidth = nn_points_bw * dist_eq / grid.RADIUS_EARTH
 
         return bandwidth
 
-    def _link_bundles(self, num_rand_permutations,
-                      num_cpus=mpi.cpu_count(),
-                      nn_points_bw=None,
-                      link_bundle_folder=None):
+    def _link_bundles(
+        self,
+        num_rand_permutations,
+        num_cpus=mpi.cpu_count(),
+        nn_points_bw=None,
+        link_bundle_folder=None,
+    ):
         """Significant test for adjacency. """
         # Get coordinates of all nodes
         coord_deg, coord_rad, map_idx = self.ds.get_coordinates_flatten()
 
         # First compute Null Model of old adjacency matrix
         if link_bundle_folder is None:
-            link_bundle_folder = PATH + \
-                f'/link_bundles/{self.ds.var_name}/'
+            link_bundle_folder = PATH + f"/link_bundles/{self.ds.var_name}/"
         else:
-            link_bundle_folder = PATH + f'/link_bundles/{link_bundle_folder}/'
-        null_model_filename = f'link_bundle_null_model_{self.ds.var_name}'
+            link_bundle_folder = PATH + f"/link_bundles/{link_bundle_folder}/"
+        null_model_filename = f"link_bundle_null_model_{self.ds.var_name}"
 
         # Set KDE bandwidth to 2*max_dist_of_points
         if nn_points_bw is not None:
-            dist_eq = grid.degree2distance_equator(self.ds.grid_step, radius=grid.RADIUS_EARTH)
-            bandwidth = nn_points_bw * dist_eq/grid.RADIUS_EARTH
+            dist_eq = grid.degree2distance_equator(
+                self.ds.grid_step, radius=grid.RADIUS_EARTH
+            )
+            bandwidth = nn_points_bw * dist_eq / grid.RADIUS_EARTH
         else:
-            bandwidth = None   # Is computed later based on Scott's rule of thumb!
+            bandwidth = None  # Is computed later based on Scott's rule of thumb!
 
         print(f"Start computing null model of link bundles using {bandwidth}!")
         lb.link_bundle_null_model(
-            self.adjacency, coord_rad,
+            self.adjacency,
+            coord_rad,
             link_bundle_folder=link_bundle_folder,
             filename=null_model_filename,
             num_rand_permutations=num_rand_permutations,
             num_cpus=num_cpus,
-            bw=bandwidth
+            bw=bandwidth,
         )
 
         # Now compute again adjacency corrected by the null model of the link bundles
-        try:
-            print("Now compute new adjacency matrix!")
-            adjacency = lb.link_bundle_adj_matrix(
-                adj_matrix=self.adjacency,
-                coord_rad=coord_rad,
-                null_model_folder=link_bundle_folder,
-                null_model_filename=null_model_filename,
-                bw=bandwidth,
-                perc=999,
-                num_cpus=num_cpus
-            )
-        except:
-            print(
-                "Other jobs for link bundling are not finished yet! Last job will do the rest!")
-            sys.exit()
+        # try:
+        print("Now compute new adjacency matrix!")
+        adjacency = lb.link_bundle_adj_matrix(
+            adj_matrix=self.adjacency,
+            coord_rad=coord_rad,
+            null_model_folder=link_bundle_folder,
+            null_model_filename=null_model_filename,
+            bw=bandwidth,
+            perc=999,
+            num_cpus=num_cpus,
+        )
+        # except:
+        #     print(
+        #         "Other jobs for link bundling are not finished yet! Last job will do the rest!"
+        #     )
+        #     sys.exit()
         self.adjacency = adjacency
 
         self.lb = True
@@ -185,8 +193,7 @@ class BaseClimNet:
         node_degree = []
         corr = self.corr
         if corr.shape != self.adjacency.shape:
-            raise ValueError(
-                "ERROR! Adjacency and weights not of the same shape!")
+            raise ValueError("ERROR! Adjacency and weights not of the same shape!")
         for node in self.adjacency:
             if weighted is True:
                 node_degree.append(np.sum(node))
@@ -220,80 +227,6 @@ class BaseClimNet:
 
         return edge_list
 
-    def get_isolated_nodes(self, matrix=None):
-        if matrix is None:
-            matrix = self.adjacency
-        is_n_ids_o = np.where(~matrix.any(axis=0))[0]  # columns = outgoing
-        is_n_ids_i = np.where(~matrix.any(axis=1))[0]  # rows = incoming
-        is_nodes = np.union1d(is_n_ids_i, is_n_ids_o)
-        if len(is_nodes) == 0:
-            print("WARNING! No isolated nodes!")
-
-        return is_nodes
-
-    def remove_isolated_nodes(self):
-        isolated_nodes = self.get_isolated_nodes()
-        # While because maybe remove of lines will create further empty lines
-        while len(isolated_nodes) > 0:
-            frac_is = len(isolated_nodes) / len(self.adjacency)
-            print(
-                f"WARNING! Removed isolated nodes from network! Frac: {frac_is:.4f}")
-            # This removes unconnected nodes as well from the network
-            adj_rem_rows = np.delete(
-                self.adjacency, isolated_nodes, axis=0)  # Delete rows
-            adj_rem_cols_rows = np.delete(
-                adj_rem_rows, isolated_nodes, axis=1)  # Delete columns
-            M, N = adj_rem_cols_rows.shape
-            if M != N:
-                raise ValueError(
-                    f"Deleted different number of rows{M} and columns {N}")
-            else:
-                self.adjacency = adj_rem_cols_rows
-
-                if self.corr is not None:
-                    corr_rows = np.delete(
-                        self.corr, isolated_nodes, axis=0)  # Delete rows
-                    self.corr = np.delete(
-                        corr_rows, isolated_nodes, axis=1)  # Delete columns
-
-                    if self.corr.shape != self.adjacency.shape:
-                        raise ValueError(
-                            f"Corr shape {self.corr.shape} != Adj shape {self.adjacency.shape}!")
-
-            # This masks the nodes as well in the dataset
-            print('Update Dataset as well and remove unconnected nodes')
-            self.ds.mask_node_ids(isolated_nodes)
-            if self.corr is None:
-                isolated_nodes = self.get_isolated_nodes(matrix=self.adjacency)
-            else:
-                # Maybe some weights are 0 even though adjacency is 1
-                isolated_nodes = self.get_isolated_nodes(matrix=self.corr)
-
-        self.ds.re_init()
-
-        return None
-
-    def make_network_undirected(self, dense=True):
-        # Make sure that adjacency is symmetric (ie. in-degree = out-degree)
-        print(f'Make network undirected with dense={dense}')
-        if dense:  # every link is counted
-            adj_new = np.where(self.adjacency > self.adjacency.T,
-                               self.adjacency,
-                               self.adjacency.T)
-            if adj_new.shape[0] == adj_new.shape[1]:
-                self.adjacency = adj_new
-            else:
-                raise ValueError(
-                    f'Resulting adj not symmetric {adj_new.shape}!')
-            if self.corr is not None:
-                self.corr = np.where(self.corr > self.corr.T,
-                                     self.corr,
-                                     self.corr.T)
-        else:
-            self.adjacency = self.adjacency * self.adjacency.transpose()
-
-        return self.adjacency
-
 
 class CorrClimNet(BaseClimNet):
     """Correlation based climate network.
@@ -312,14 +245,19 @@ class CorrClimNet(BaseClimNet):
         Method for statistical p-value testing. Default is 'bonf' (Holm-Bonferroni method)
     """
 
-    def __init__(self, dataset, corr_method='spearman',
-                 threshold=None,
-                 density=None,
-                 stat_test='twosided', confidence=0.99,
-                 significance_test='standard'):
+    def __init__(
+        self,
+        dataset,
+        corr_method="spearman",
+        threshold=None,
+        density=None,
+        stat_test="twosided",
+        confidence=0.99,
+        significance_test="bonf",
+    ):
         super().__init__(dataset)
         # set to class variables
-        self.type = 'correlation'
+        self.type = "correlation"
         self.corr_method = corr_method
         self.threshold = threshold
         self.density = density
@@ -340,22 +278,24 @@ class CorrClimNet(BaseClimNet):
 
         """
         # spearman's rank correlation
-        if self.corr_method == 'spearman':
-            self.corr, self.pvalue = self.calc_spearman(
-                self.ds, self.stat_test)
+        if self.corr_method == "spearman":
+            self.corr, self.pvalue = self.calc_spearman(self.ds, self.stat_test)
 
         # pearson correlation
-        elif self.corr_method == 'pearson':
+        elif self.corr_method == "pearson":
             self.corr, self.pvalue = self.calc_pearson(self.ds)
         else:
             raise ValueError("Choosen correlation method does not exist!")
 
-        self.adjacency = self.get_adjacency(self.corr, self.pvalue,
-                                            threshold=self.threshold,
-                                            density=self.density,
-                                            confidence=self.confidence,
-                                            significance_test=self.significance_test,
-                                            **kwargs)
+        self.adjacency = self.get_adjacency(
+            self.corr,
+            self.pvalue,
+            threshold=self.threshold,
+            density=self.density,
+            confidence=self.confidence,
+            significance_test=self.significance_test,
+            **kwargs,
+        )
 
         return None
 
@@ -369,25 +309,26 @@ class CorrClimNet(BaseClimNet):
         """
         if os.path.exists(fname):
             print("Warning File" + fname + " already exists! No over writing!")
-            os.rename(fname, fname+'_bak')
+            os.rename(fname, fname + "_bak")
 
-        np.savez(fname,
-                 corr=self.corr,
-                 pvalue=self.pvalue,
-                 adjacency=self.adjacency,
-                 lb=np.array([self.lb]),
-                 corr_method=np.array([self.corr_method]),
-                 threshold=np.array([self.threshold]),
-                 density=np.array([self.density]),
-                 confidence=np.array([self.confidence]),
-                 stat_test=np.array([self.stat_test]),
-                 significance_test=np.array([self.significance_test]),
-                 type=np.array([self.type])
-                 )
+        np.savez(
+            fname,
+            corr=self.corr,
+            pvalue=self.pvalue,
+            adjacency=self.adjacency,
+            lb=np.array([self.lb]),
+            corr_method=np.array([self.corr_method]),
+            threshold=np.array([self.threshold]),
+            density=np.array([self.density]),
+            confidence=np.array([self.confidence]),
+            stat_test=np.array([self.stat_test]),
+            significance_test=np.array([self.significance_test]),
+            type=np.array([self.type]),
+        )
         print(f"Network stored to {fname}!")
         return None
 
-    def calc_spearman(self, dataset, test='onesided'):
+    def calc_spearman(self, dataset, test="onesided"):
         """Spearman correlation of the flattened and remove NaNs object.
         """
         data = dataset.flatten_array()
@@ -406,11 +347,16 @@ class CorrClimNet(BaseClimNet):
         corr, pvalue = sut.calc_pearson(data=data, verbose=True)
         return corr, pvalue
 
-    def get_adjacency(self, corr, pvalue,
-                      threshold=None,
-                      density=None,
-                      confidence=0.95,
-                      significance_test='bonf', **iaaft_kwargs):
+    def get_adjacency(
+        self,
+        corr,
+        pvalue,
+        threshold=None,
+        density=None,
+        confidence=0.95,
+        significance_test="bonf",
+        **iaaft_kwargs,
+    ):
         """Create adjacency matrix from spearman correlation.
 
         Args:
@@ -432,36 +378,34 @@ class CorrClimNet(BaseClimNet):
         # Significance test on p-values
         if significance_test == "bonf" or significance_test == "dunn":
             pval_flat = pvalue.flatten()
-            indices = holm(pval_flat, alpha=(
-                1-confidence), corr_type=significance_test)
+            indices = holm(
+                pval_flat, alpha=(1 - confidence), corr_type=significance_test
+            )
             mask_list = np.zeros_like(pval_flat)
             mask_list[indices] = 1
             mask_confidence = np.reshape(mask_list, pvalue.shape)
         elif significance_test == "standard":
-            mask_confidence = np.where(pvalue <= (
-                1-confidence), 1, 0)  # p-value test
+            mask_confidence = np.where(pvalue <= (1 - confidence), 1, 0)  # p-value test
         elif significance_test == "iaaft":
             # self for read out TODO: delete in the future
             self.corr_distribution = self.get_iaaft_surrogates(
                 self.ds, corr_method=self.corr_method, **iaaft_kwargs
             )
-            q_corr = np.quantile(np.abs(self.corr_distribution),
-                                 q=confidence, axis=0)
+            q_corr = np.quantile(np.abs(self.corr_distribution), q=confidence, axis=0)
             mask_confidence = np.where(np.abs(corr) >= q_corr, 1, 0)
         else:
             raise ValueError(f"Method {significance_test} does not exist!")
 
         # Threhold test on correlation values
         if threshold is not None and density is not None:
-            raise ValueError('Threshold and density cannot both be specified!')
+            raise ValueError("Threshold and density cannot both be specified!")
 
         if threshold is not None:
             mask_correlation = np.where(np.abs(corr) >= threshold, 1, 0)
         elif density is not None:
             if density < 0 or density > 1:
-                raise ValueError(
-                    f'Density must be between 0 and 1 but is {density}!')
-            num_links = int(density * len(corr)**2)
+                raise ValueError(f"Density must be between 0 and 1 but is {density}!")
+            num_links = int(density * len(corr) ** 2)
             buff = np.abs(corr)
             for i in range(corr.shape[0]):
                 buff[i, i] = 0  # set diagonale to 0
@@ -469,7 +413,7 @@ class CorrClimNet(BaseClimNet):
             sorted_values = np.sort(buff.flatten())
             threshold = sorted_values[-num_links]
             mask_correlation = np.where(buff >= threshold, 1, 0)
-            print(f'Minimum Correlation values: {threshold}')
+            print(f"Minimum Correlation values: {threshold}")
         elif threshold is None and density is None:
             mask_correlation = 1
 
@@ -484,14 +428,17 @@ class CorrClimNet(BaseClimNet):
 
         return adjacency
 
-    def get_iaaft_surrogates(self, dataset,
-                             num_surrogates=1000,
-                             corr_method='pearson',
-                             tol_pc=5.,
-                             verbose=True,
-                             maxiter=1E6,
-                             sorttype="quicksort",
-                             num_cpus=mpi.cpu_count()):
+    def get_iaaft_surrogates(
+        self,
+        dataset,
+        num_surrogates=1000,
+        corr_method="pearson",
+        tol_pc=5.0,
+        verbose=True,
+        maxiter=1e6,
+        sorttype="quicksort",
+        num_cpus=mpi.cpu_count(),
+    ):
         """Applies Iterative adjusted amplitude Fourier transform for all spatial locations
         of time series in
 
@@ -507,34 +454,27 @@ class CorrClimNet(BaseClimNet):
         Returns:
             [type]: [description]
         """
-        print("Applies Iterative adjusted amplitude Fourier transform for all pairs"
-              " of spatial locations may take a while!")
+        print(
+            "Applies Iterative adjusted amplitude Fourier transform for all pairs"
+            " of spatial locations may take a while!"
+        )
 
         data = dataset.flatten_array()
         print(data.shape)
 
         print(f"Number of available CPUs: {num_cpus}")
-        backend = 'loky'
-        corr_matrices = (
-            Parallel(n_jobs=num_cpus, backend=backend)
-            (delayed(self.iaaft_surrogate)
-                (data,
-                 corr_method,
-                 tol_pc,
-                 maxiter,
-                 sorttype)
-             for s in tqdm(range(num_surrogates))
-             )
+        backend = "loky"
+        corr_matrices = Parallel(n_jobs=num_cpus, backend=backend)(
+            delayed(self.iaaft_surrogate)(data, corr_method, tol_pc, maxiter, sorttype)
+            for s in tqdm(range(num_surrogates))
         )
 
         return np.array(corr_matrices)
 
     @staticmethod
-    def iaaft_surrogate(data,
-                        corr_method='pearson',
-                        tol_pc=5.,
-                        maxiter=1E6,
-                        sorttype="quicksort"):
+    def iaaft_surrogate(
+        data, corr_method="pearson", tol_pc=5.0, maxiter=1e6, sorttype="quicksort"
+    ):
         """Applies Iterative adjusted amplitude Fourier transform for all pairs of
         spatial locations.
 
@@ -551,40 +491,42 @@ class CorrClimNet(BaseClimNet):
         """
         surr_arr = []
         for ts in data:
-            ts_iaaft = iaaft.surrogates(ts, ns=1,
-                                        verbose=False,
-                                        maxiter=maxiter,
-                                        tol_pc=tol_pc,
-                                        sorttype=sorttype)[0]
+            ts_iaaft = iaaft.surrogates(
+                ts,
+                ns=1,
+                verbose=False,
+                maxiter=maxiter,
+                tol_pc=tol_pc,
+                sorttype=sorttype,
+            )[0]
             surr_arr.append(ts_iaaft)
 
         assert np.array(surr_arr).shape == data.shape
 
-        if corr_method == 'pearson':
+        if corr_method == "pearson":
             corr = np.corrcoef(np.array(surr_arr).T)
-        elif corr_method == 'spearman':
-            corr, _ = stat.spearmanr(
-                data, axis=0, nan_policy='propagate')
+        elif corr_method == "spearman":
+            corr, _ = stat.spearmanr(data, axis=0, nan_policy="propagate")
         else:
-            raise ValueError(
-                f"Correlation method {corr_method} not known!")
+            raise ValueError(f"Correlation method {corr_method} not known!")
 
         return corr
 
-    def link_bundles(self, num_rand_permutations,
-                     num_cpus=mpi.cpu_count(),
-                     bw_type='links',
-                     nn_points_bw=1,
-                     link_bundle_folder=None):
+    def link_bundles(
+        self,
+        num_rand_permutations,
+        num_cpus=mpi.cpu_count(),
+        nn_points_bw=None,
+        link_bundle_folder=None,
+    ):
         self.adjacency = self._link_bundles(
             num_rand_permutations=num_rand_permutations,
-            bw_type=bw_type,
             num_cpus=num_cpus,
             nn_points_bw=nn_points_bw,
-            link_bundle_folder=link_bundle_folder
+            link_bundle_folder=link_bundle_folder,
         )
 
-        self.adjacency = self.make_network_undirected()
+        # self.adjacency = nwf.make_network_undirected()
 
         return self.adjacency
 
@@ -606,22 +548,20 @@ class EventSyncClimNet(BaseClimNet):
         Method for statistical p-value testing. Default is 'bonf' (Holm-Bonferroni method)
     """
 
-    def __init__(self, dataset,
-                 taumax=10,
-                 min_num_sync_events=2,
-                 weighted=False):
+    def __init__(self, dataset, taumax=10, min_num_sync_events=2, weighted=False):
         vars = dataset.vars
-        if 'evs' not in vars:
+        if "evs" not in vars:
             raise ValueError(
-                "For EventSyncNet a dataset has to be provided that contains event series!")
+                "For EventSyncNet a dataset has to be provided that contains event series!"
+            )
         super().__init__(dataset)
         # set to class variables
-        self.type = 'evs'
+        self.type = "evs"
         self.taumax = taumax
         self.weighted = weighted
         self.min_num_sync_events = min_num_sync_events
-        self.es_filespath = PATH + '/es_files/'
-        self.null_model_folder = self.es_filespath + 'null_model/'
+        self.es_filespath = f"{PATH}/../es_files/"
+        self.null_model_folder = self.es_filespath + "null_model/"
 
     def save(self, file):
         """Store adjacency, correlation and pvalues to an .npz file.
@@ -652,13 +592,15 @@ class EventSyncClimNet(BaseClimNet):
         print(f"Network stored to {file}!")
         return None
 
-    def create(self, E_matrix_folder=None,
-               null_model_file=None,
-               q_med=0.5,
-               lq=0.25,
-               hq=0.75,
-               q_sig=0.95,
-               ):
+    def create(
+        self,
+        E_matrix_folder=None,
+        null_model_file=None,
+        q_med=0.5,
+        lq=0.25,
+        hq=0.75,
+        q_sig=0.95,
+    ):
         """
         This function has to be called twice, once, to compute the exact numbers of synchronous
         events between two time series, second again to compute the adjacency matrix
@@ -667,37 +609,36 @@ class EventSyncClimNet(BaseClimNet):
         passed correctly to the function.
         """
         # Test if ES data is computed
-        if self.ds.ds['evs'] is None:
-            raise ValueError(
-                "ERROR Event Synchronization data is not computed yet")
+        if self.ds.ds["evs"] is None:
+            raise ValueError("ERROR Event Synchronization data is not computed yet")
         else:
-            data_evs = self.ds.ds['evs']
+            data_evs = self.ds.ds["evs"]
             num_time_series = self.ds.flatten_array().shape[1]
             if num_time_series == data_evs.shape[1]:
                 print("WARNING: The Mask did not remove any values!")
         if E_matrix_folder is None:
-            E_matrix_folder = self.es_filespath + \
-                f'/E_matrix/{self.ds.var_name}_{self.ds.grid_step}/'
+            E_matrix_folder = (
+                self.es_filespath + f"/E_matrix/{self.ds.var_name}_{self.ds.grid_step}/"
+            )
         else:
-            E_matrix_folder = self.es_filespath + \
-                f'/E_matrix/{E_matrix_folder}'
+            E_matrix_folder = self.es_filespath + f"/E_matrix/{E_matrix_folder}"
 
         if null_model_file is None:
             raise ValueError("ERROR Please provide null_model_file!")
         else:
-            null_model_file = self.es_filespath + \
-                f'null_model/{null_model_file}'
+            null_model_file = self.es_filespath + f"null_model/{null_model_file}"
             if not os.path.exists(null_model_file):
-                raise ValueError(f'File {null_model_file} does not exist!')
-        print(f'Load null model: {null_model_file}')
+                raise ValueError(f"File {null_model_file} does not exist!")
+        print(f"Load null model: {null_model_file}")
         null_model = np.load(null_model_file, allow_pickle=True).item()
 
-        self.event_synchronization_run(data_evs=data_evs,
-                                       E_matrix_folder=E_matrix_folder,
-                                       taumax=self.taumax,
-                                       null_model=null_model,
-                                       min_num_sync_events=self.min_num_sync_events,
-                                       )
+        self.event_synchronization_run(
+            data_evs=data_evs,
+            E_matrix_folder=E_matrix_folder,
+            taumax=self.taumax,
+            null_model=null_model,
+            min_num_sync_events=self.min_num_sync_events,
+        )
 
         self.adjacency, self.corr = self.compute_es_adjacency(
             E_matrix_folder=E_matrix_folder,
@@ -710,14 +651,17 @@ class EventSyncClimNet(BaseClimNet):
             q_sig=q_sig,
         )
 
+        nwf.get_sparsity(M=self.adjacency)
         return None
 
-    def event_synchronization_run(self, data_evs,
-                                  E_matrix_folder=None,
-                                  taumax=10,
-                                  min_num_sync_events=2,
-                                  null_model=None,
-                                  ):
+    def event_synchronization_run(
+        self,
+        data_evs,
+        E_matrix_folder=None,
+        taumax=10,
+        min_num_sync_events=2,
+        null_model=None,
+    ):
         """
         Event synchronization definition
 
@@ -739,66 +683,57 @@ class EventSyncClimNet(BaseClimNet):
         """
 
         # for job array
-        try:
-            min_job_id = int(os.environ['SLURM_ARRAY_TASK_MIN'])
-            max_job_id = int(os.environ['SLURM_ARRAY_TASK_MAX'])
-            job_id = int(os.environ['SLURM_ARRAY_TASK_ID'])
-            run_id = int(os.environ['SLURM_ARRAY_JOB_ID'])
-            num_jobs = int(os.environ['SLURM_ARRAY_TASK_COUNT'])
-            # num_jobs=max_job_id-min_job_id +1
-            # num_jobs=30
-
-            print((f"Run {run_id} for Subjob job_id: {job_id}/{num_jobs},"
-                   f"Min Job ID: {min_job_id}, Max Job ID: {max_job_id}")
-                  )
-        except KeyError:
-            job_id = 0
-            num_jobs = 1
-            run_id = 0
-            print("Not running with SLURM job arrays, but with manual id: ", job_id)
+        job_id, num_jobs = gut.get_job_array_ids()
 
         event_series_matrix = self.ds.flatten_array(
-            dataarray=data_evs, check=False).T
+            dataarray=data_evs, check=False
+        ).T  # transpose to get array of timeseries!
 
         if not os.path.exists(E_matrix_folder):
             os.makedirs(E_matrix_folder)
-        E_matrix_filename = (f'E_matrix_{self.ds.var_name}_'
-                             f'q_{self.ds.q}_min_num_events_{self.ds.min_evs}_'
-                             f'taumax_{taumax}_jobid_{job_id}.npy')
+        E_matrix_filename = (
+            f"E_matrix_{self.ds.var_name}_"
+            f"q_{self.ds.q}_min_num_events_{self.ds.min_evs}_"
+            f"taumax_{taumax}_jobid_{job_id}.npy"
+        )
 
-        print(
-            f'JobID {job_id}: Start comparing all time series with taumax={taumax}!')
-        if not os.path.exists(E_matrix_folder+E_matrix_filename):
-            es.parallel_event_synchronization(event_series_matrix,
-                                              taumax=taumax,
-                                              min_num_sync_events=min_num_sync_events,
-                                              job_id=job_id,
-                                              num_jobs=num_jobs,
-                                              savepath=E_matrix_folder+E_matrix_filename,
-                                              q_dict=null_model,
-                                              q_sig=0.5,   # TODO maybe higher/lower threshold? This is not necessarily the sign threshold for later tests
-                                              )
+        print(f"JobID {job_id}: Start comparing all time series with taumax={taumax}!")
+        if not os.path.exists(E_matrix_folder + E_matrix_filename):
+            es.parallel_event_synchronization(
+                event_series_matrix,
+                taumax=taumax,
+                min_num_sync_events=min_num_sync_events,
+                job_id=job_id,
+                num_jobs=num_jobs,
+                savepath=E_matrix_folder + E_matrix_filename,
+                q_dict=null_model,
+                q_min=0.5,  # This is not the sign threshold for later tests, it is only to store less data
+            )
         else:
-            print(
-                f'File {E_matrix_folder+E_matrix_filename} does already exist!')
+            print(f"File {E_matrix_folder+E_matrix_filename} does already exist!")
 
         path = E_matrix_folder
-        E_matrix_files = [os.path.join(path, fn)
-                          for fn in next(os.walk(path))[2]]
+        E_matrix_files = [os.path.join(path, fn) for fn in next(os.walk(path))[2]]
         if len(E_matrix_files) < num_jobs:
             print(
-                f"JobId {job_id}: Finished. Not all jobs have finished yet (missing {num_jobs} - {len(E_matrix_files)}!")
+                f"JobId {job_id}: Finished. Missing {num_jobs} - {len(E_matrix_files)}!",
+                flush=True,
+            )
             sys.exit(0)
 
         return None
 
-    def compute_es_adjacency(self, E_matrix_folder, num_time_series,
-                             weighted=False,
-                             q_dict=None,
-                             q_med=0.5,
-                             lq=0.25,
-                             hq=0.75,
-                             q_sig=0.95):
+    def compute_es_adjacency(
+        self,
+        E_matrix_folder,
+        num_time_series,
+        weighted=False,
+        q_dict=None,
+        q_med=0.5,
+        lq=0.25,
+        hq=0.75,
+        q_sig=0.95,
+    ):
         if not os.path.exists(E_matrix_folder):
             raise ValueError("ERROR! The parallel ES is not computed yet!")
 
@@ -810,18 +745,21 @@ class EventSyncClimNet(BaseClimNet):
             q_med=q_med,
             lq=lq,
             hq=hq,
-            q_sig=q_sig)
+            q_sig=q_sig,
+        )
 
         if adj_null_model.shape != weights.shape:
             raise ValueError("Adjacency and weights not of the same shape!")
 
         return adj_null_model, weights
 
-    def compute_es_null_model(self,
-                              n_pmts=3000,
-                              null_model_file=None,
-                              q=[0.25, 0.5, 0.75, 0.95, 0.98, 0.99, 0.995, 0.999],
-                              rc_null_model=False):
+    def compute_es_null_model(
+        self,
+        n_pmts=3000,
+        null_model_file=None,
+        q=[0.25, 0.5, 0.75, 0.95, 0.98, 0.99, 0.995, 0.999],
+        rc_null_model=False,
+    ):
         """Generates a null model for the given dataset timeseries
 
         Args:
@@ -831,30 +769,28 @@ class EventSyncClimNet(BaseClimNet):
         Returns:
             None
         """
-        from math import ceil
         print(f"Create ES Null Model with {n_pmts} permutations!")
-        time_steps, _ = self.ds.ds['evs'].shape
-        max_num_events = ceil(time_steps*(1-self.ds.q))
+
+        time_steps = tu.get_num_tps(ds=self.ds.ds)
+        max_num_events = tu.get_max_num_tps(ds=self.ds.ds, q=self.q)
 
         if not os.path.exists(self.null_model_folder):
             print(f"Created folder {self.null_model_folder}!")
             os.makedirs(self.null_model_folder)
-        if null_model_file is None:
-            num_ts, _ = self.ds.ds['evs'].shape
-            null_model_file = f'null_model_num_ts_{num_ts}_taumax_{self.taumax}_npmts_{n_pmts}.npy'
 
         savepath = self.null_model_folder + null_model_file
         if not os.path.exists(savepath):
             rc_null_model = True
         if rc_null_model:
-            print(f'Create file {savepath}!')
+            print(f"Create file {savepath}!")
             q_dict = es.null_model_distribution(
                 length_time_series=time_steps,
                 min_num_events=1,
                 max_num_events=max_num_events,
                 num_permutations=n_pmts,
                 savepath=savepath,
-                q=q)
+                q=q,
+            )
         else:
             print(f"Dict already exists: {savepath}! Load file...")
             # q_dict is dictionary
@@ -862,22 +798,23 @@ class EventSyncClimNet(BaseClimNet):
 
         return q_dict
 
-    def link_bundles(self, num_rand_permutations,
-                     num_cpus=mpi.cpu_count(),
-                     bw_type='links',
-                     nn_points_bw=1,
-                     link_bundle_folder=None):
+    def link_bundles(
+        self,
+        num_rand_permutations,
+        num_cpus=mpi.cpu_count(),
+        nn_points_bw=None,
+        link_bundle_folder=None,
+    ):
 
         self.adjacency = self._link_bundles(
             num_rand_permutations=num_rand_permutations,
-            bw_type=bw_type,
             num_cpus=num_cpus,
             nn_points_bw=nn_points_bw,
-            link_bundle_folder=link_bundle_folder
+            link_bundle_folder=link_bundle_folder,
         )
 
         # Make sure that adjacency is symmetric (ie. in-degree = out-degree)
-        self.adjacency = self.make_network_undirected()
+        # self.adjacency = nwf.make_network_undirected()
         # Correct the weight matrix accordingly to the links
         if self.corr is not None:
             self.corr = np.where(self.adjacency == 1, self.corr, 0)
@@ -904,23 +841,25 @@ class EventSyncClimNetRandom(EventSyncClimNet):
 
     def __init__(self, dataset, taumax=10, min_num_sync_events=2):
         vars = dataset.vars
-        if 'evs' not in vars:
+        if "evs" not in vars:
             raise ValueError(
-                "For EventSyncNet a dataset has to be provided that contains event series!")
-        super().__init__(dataset=dataset,
-                         taumax=taumax,
-                         min_num_sync_events=min_num_sync_events
-                         )
+                "For EventSyncNet a dataset has to be provided that contains event series!"
+            )
+        super().__init__(
+            dataset=dataset, taumax=taumax, min_num_sync_events=min_num_sync_events
+        )
 
-    def create(self, E_matrix_folder=None,
-               null_model_file=None,
-               sy=None,
-               ey=None,
-               sm_arr=['Jan'],
-               em_arr=['Dec'],
-               set_rest_zero=False,
-               full_rnd=False,
-               ):
+    def create(
+        self,
+        E_matrix_folder=None,
+        null_model_file=None,
+        sy=None,
+        ey=None,
+        sm_arr=["Jan"],
+        em_arr=["Dec"],
+        set_rest_zero=False,
+        full_rnd=False,
+    ):
         """
         This function has to be called twice, once, to compute the exact numbers of synchronous
         events between two time series, second again to compute the adjacency matrix
@@ -929,48 +868,52 @@ class EventSyncClimNetRandom(EventSyncClimNet):
         passed correctly to the function.
         """
         # Test if ES data is computed
-        if self.ds.ds['evs'] is None:
-            raise ValueError(
-                "ERROR Event Synchronization data is not computed yet")
+        if self.ds.ds["evs"] is None:
+            raise ValueError("ERROR Event Synchronization data is not computed yet")
         else:
-            data_evs = self.ds.ds['evs']
+            data_evs = self.ds.ds["evs"]
             num_time_series = self.ds.flatten_array().shape[1]
             if num_time_series == data_evs.shape[1]:
                 print("WARNING: The Mask did not remove any values!")
         if E_matrix_folder is None:
-            E_matrix_folder = self.es_filespath + \
-                f'/E_matrix/{self.ds.var_name}_{self.ds.grid_step}_rnd/'
+            E_matrix_folder = (
+                self.es_filespath
+                + f"/E_matrix/{self.ds.var_name}_{self.ds.grid_step}_rnd/"
+            )
         else:
-            E_matrix_folder = self.es_filespath + \
-                f'/E_matrix_rnd/{E_matrix_folder}'
+            E_matrix_folder = self.es_filespath + f"/E_matrix_rnd/{E_matrix_folder}"
 
         if null_model_file is None:
             null_model_file = self.compute_es_null_model()
-            print('finished computing ES null model. End all jobs!')
+            print("finished computing ES null model. End all jobs!")
             sys.exit()
         else:
-            null_model_file = self.es_filespath + \
-                f'null_model/{null_model_file}'
+            null_model_file = self.es_filespath + f"null_model/{null_model_file}"
             if not os.path.exists(null_model_file):
-                raise ValueError(f'File {null_model_file} does not exist!')
+                raise ValueError(f"File {null_model_file} does not exist!")
 
         # Randomize time series
-        data_evs = self.ds.randomize_spatio_temporal_data_yearly(data=data_evs,
-                                                                 start_year=sy,
-                                                                 end_year=ey,
-                                                                 sm_arr=sm_arr,
-                                                                 em_arr=em_arr,
-                                                                 var='evs',
-                                                                 set_rest_zero=set_rest_zero,
-                                                                 full_rnd=full_rnd,
-                                                                 seed=0)
+        data_evs = self.ds.randomize_spatio_temporal_data_yearly(
+            data=data_evs,
+            start_year=sy,
+            end_year=ey,
+            sm_arr=sm_arr,
+            em_arr=em_arr,
+            var="evs",
+            set_rest_zero=set_rest_zero,
+            full_rnd=full_rnd,
+            seed=0,
+        )
 
-        self.event_synchronization_run(data_evs=data_evs,
-                                       E_matrix_folder=E_matrix_folder, taumax=self.taumax,
-                                       null_model_file=null_model_file,
-                                       )
+        self.event_synchronization_run(
+            data_evs=data_evs,
+            E_matrix_folder=E_matrix_folder,
+            taumax=self.taumax,
+            null_model_file=null_model_file,
+        )
 
-        self.adjacency = self.compute_es_adjacency(E_matrix_folder=E_matrix_folder,
-                                                   num_time_series=num_time_series)
+        self.adjacency = self.compute_es_adjacency(
+            E_matrix_folder=E_matrix_folder, num_time_series=num_time_series
+        )
 
         return None

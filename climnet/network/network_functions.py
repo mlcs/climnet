@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+"""
 from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering
 import scipy.cluster.hierarchy as sch
@@ -24,6 +28,43 @@ def get_threshold(adjacency, corr):
         min_val = 0
         print('WARNING: No treshold defined. Set to default = 0.')
     return min_val
+
+
+def get_isolated_nodes(adjacency):
+    """Returns the isolated nodes of an adjacency matrix as indices.
+
+    Args:
+        adjacency (np.ndarray, optional): 2d array of indices of adjacency.
+
+    Returns:
+        list: list of indices of isolated node ids.
+    """
+    is_n_ids_o = np.where(~adjacency.any(axis=0))[0]  # columns = outgoing
+    is_n_ids_i = np.where(~adjacency.any(axis=1))[0]  # rows = incoming
+    is_nodes = np.union1d(is_n_ids_i, is_n_ids_o)
+    if len(is_nodes) == 0:
+        print("No isolated nodes anymore!")
+
+    return is_nodes
+
+
+def make_network_undirected(adjacency, corr=None, dense=True):
+    # Makes sure that adjacency is symmetric (ie. in-degree = out-degree)
+    print(f"Make network undirected with dense={dense}")
+    if dense:  # every link is counted
+        adj_new = np.where(
+            adjacency > adjacency.T, adjacency, adjacency.T
+        )
+        if adj_new.shape[0] == adj_new.shape[1]:
+            adjacency = adj_new
+        else:
+            raise ValueError(f"Resulting adj not symmetric {adj_new.shape}!")
+        if corr is not None:
+            corr = np.where(corr > corr.T, corr, corr.T)
+    else:
+        adjacency = adjacency * adjacency.transpose()
+
+    return adjacency
 
 
 def get_adj_from_edge_list(self, edge_list, len_adj=None):
@@ -106,9 +147,38 @@ def get_lon_lat_el(el, netx):
     return np.array(data)
 
 
-def degree(netx):
-    degs = {node: val for (node, val) in netx.degree()}
-    nx.set_node_attributes(netx, degs, "degree")
+def degree(netx, weighted=False):
+    print(f'Compute degree, weighted={weighted}!')
+    if weighted:
+        netx = weighted_degree(netx=netx)
+    else:
+        degs = {node: val for (node, val) in netx.degree()}
+        nx.set_node_attributes(netx, degs, "degree")
+    return netx
+
+
+def in_degree(netx):
+    degs = {node: val for (node, val) in netx.in_degree()}
+    nx.set_node_attributes(netx, degs, "in_degree")
+    return netx
+
+
+def out_degree(netx):
+    degs = {node: val for (node, val) in netx.out_degree()}
+    nx.set_node_attributes(netx, degs, "out_degree")
+    return netx
+
+
+def divergence(netx):
+    netx = in_degree(netx=netx)
+    netx = out_degree(netx=netx)
+    in_deg = nx.get_node_attributes(netx, 'in_degree')
+    out_deg = nx.get_node_attributes(netx, 'out_degree')
+
+    div = {}
+    for (node, val) in in_deg.items():
+        div[node] = val - out_deg[node]
+    nx.set_node_attributes(netx, div, "divergence")
     return netx
 
 
@@ -142,6 +212,66 @@ def clustering_coeff(netx):
     return netx
 
 
+def triangles(netx):
+    print('Compute Triangles...')
+    triangles = nx.triangles(netx)
+    nx.set_node_attributes(netx, triangles, "triangles")
+
+    return netx
+
+
+def clustering_coeff_edges(netx):
+    netx = clustering_coeff(netx=netx)
+    for u, v, e in netx.edges(data=True):
+        netx.edges[u, v]["clustering"] = netx.nodes[u]['clustering'] + \
+            netx.nodes[v]['clustering']
+
+    return netx
+
+
+def inv_clustering_coeff_edges(netx):
+    netx = clustering_coeff(netx=netx)
+    for u, v, e in netx.edges(data=True):
+        netx.edges[u, v]["inv_clustering"] = 1 / \
+            netx.nodes[u]['clustering'] + 1/netx.nodes[v]['clustering']
+
+    return netx
+
+
+def cluster_deg_ratio(netx):
+    """Get the ratio of Clustering/Degree per edge.
+
+    Args:
+        netx (networkx.graph): graph of Netx
+    """
+    netx = degree(netx=netx)
+    netx = triangles(netx=netx)
+    for u, v, e in netx.edges(data=True):
+        e["cdr"] = 1/2 * (netx.nodes[u]['triangles']/netx.nodes[u]['degree'] +
+                          netx.nodes[v]['triangles']/netx.nodes[v]['degree'])
+
+    return netx
+
+
+def set_node_attr(G, attr, norm=False):
+    for ne in G.nodes:
+        node_sum = 0.0
+        node_cnt = 0
+        for u, v, e in G.edges(ne, data=True):
+            node_sum += e[attr]
+            node_cnt += 1
+        # Normalized attribute by degree
+        if node_cnt > 0:
+            if norm is True:
+                # /G.degree(ne)
+                G.nodes[ne][attr] = node_sum / node_cnt
+            else:
+                G.nodes[ne][attr] = node_sum
+        else:
+            G.nodes[ne][attr] = np.nan
+
+    return G
+
 # ################## Clustering
 
 
@@ -165,7 +295,6 @@ def apply_K_means_el(data, n, el=None):
             'center': coord_centers,
             'cluster': cluster_dict
             }
-
 
 
 def plot_dendrogram(model, **kwargs):

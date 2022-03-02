@@ -7,6 +7,7 @@ Created on Mon Jan  4 10:33:56 2021
 """
 
 # python libraries
+import climnet.utils.general_utils as gut
 import numpy as np
 import os
 import xarray as xr
@@ -40,18 +41,21 @@ def spherical_kde(link_points, coord_rad, bw_opt=None):
     """
     assert link_points.shape[1] == 2
     # Do KDE fit by using haversine metric that accounts for spherical coordinates
-    # scott_factor = 0.2
-    # num_links = len(link_points)
-    # bw = scott_factor * num_links**(-1./(2+4))  # Scott's rule of thumb (compare Boers et al. 2019)
+    num_links = len(link_points)
+    if num_links <= 2:
+        scott_factor = 0.2
+        # Scott's rule of thumb (compare Boers et al. 2019)
+        if bw_opt is None:
+            bw_opt = scott_factor * num_links**(-1./(2+4))
 
-    # kde = KernelDensity(metric='haversine', kernel='gaussian',
-    #                     algorithm='ball_tree', bandwidth=bw_opt)
-    # kde.fit(link_points)
-    # Z = np.exp(kde.score_samples(coord_rad))
-
-    # Use scipy version because it automatically selects the bandwidth
-    kde = st.gaussian_kde(link_points.T, bw_method=bw_opt)
-    Z = np.exp(kde.evaluate(coord_rad.T))
+        kde = KernelDensity(metric='haversine', kernel='gaussian',
+                            algorithm='ball_tree', bandwidth=bw_opt)
+        kde.fit(link_points)
+        Z = np.exp(kde.score_samples(coord_rad))
+    else:
+        # Use scipy version because it automatically selects the bandwidth
+        kde = st.gaussian_kde(link_points.T, bw_method=bw_opt)
+        Z = np.exp(kde.evaluate(coord_rad.T))
     return Z
 
 
@@ -87,7 +91,7 @@ def link_bundle_null_model_link_number(coord_rad, num_links,
     num_rand_permutations: int
 
     """
-    if num_links < 1:
+    if num_links < 2:
         print("No number of links!")
         return None
 
@@ -97,11 +101,14 @@ def link_bundle_null_model_link_number(coord_rad, num_links,
         return None
 
     null_model_bundles = np.zeros((num_rand_permutations, coord_rad.shape[0]))
-
     for s in range(num_rand_permutations):
         all_links_rand = np.vstack([np.random.choice(coord_rad[:, 0], num_links),
                                     np.random.choice(coord_rad[:, 1], num_links)]).T
-        null_model_bundles[s, :] = spherical_kde(all_links_rand, coord_rad, bw_opt=bw)
+        if np.isnan(all_links_rand).any():
+            raise ValueError(
+                f'Nan in rand links for num links {num_links}, bw={bw}')
+        null_model_bundles[s, :] = spherical_kde(
+            all_links_rand, coord_rad, bw_opt=bw)
 
     stats = compute_stats(runs=null_model_bundles)
     np.save(folder + filename, stats)
@@ -150,20 +157,7 @@ def link_bundle_null_model(adj_matrix, coord_rad,
     else:
         print(f"Save to folder: {link_bundle_folder}!")
 
-    # for job array on slurm cluster
-    try:
-        min_job_id = int(os.environ['SLURM_ARRAY_TASK_MIN'])
-        max_job_id = int(os.environ['SLURM_ARRAY_TASK_MAX'])
-        job_id = int(os.environ['SLURM_ARRAY_TASK_ID'])
-        num_jobs = int(os.environ['SLURM_ARRAY_TASK_COUNT'])
-        num_jobs = max_job_id
-        print(
-            f"job_id: {job_id}/{num_jobs}, Min Job ID: {min_job_id}, Max Job ID: {max_job_id}")
-
-    except KeyError:
-        job_id = 0
-        num_jobs = 1
-        print("Not running with SLURM job arrays, but with manual id: ", job_id)
+    job_id, num_jobs = gut.get_job_array_ids()
 
     diff_links = len(link_numbers)
     one_array_length = int(diff_links/num_jobs) + 1
@@ -188,7 +182,9 @@ def link_bundle_null_model(adj_matrix, coord_rad,
 def link_bundle_one_location(adj_matrix, idx_node, coord_rad,
                              folder, filename,
                              bw=None,
-                             perc=999, plot=False):
+                             perc=999,
+                             plot=False,
+                             verbose=False):
     """
     Args:
     -----
@@ -208,8 +204,9 @@ def link_bundle_one_location(adj_matrix, idx_node, coord_rad,
     link_indices_node = np.where(adj_matrix[idx_node, :] > 0)[0]
     num_links = len(link_indices_node)
     link_coord = coord_rad[link_indices_node]
-    if num_links < 1:
-        print(f'Node with index {idx_node} has no links!')
+    if num_links < 2:  # 1 Link is by definition random
+        if verbose:
+            print(f'Node with index {idx_node} has <2 links!')
         return result_dic
 
     # KDE
