@@ -10,6 +10,8 @@ from joblib import Parallel, delayed
 import multiprocessing as mpi
 from tqdm import tqdm
 import copy
+from importlib import reload
+
 import climnet.network.link_bundles as lb
 import climnet.tsa.event_synchronization as es
 import climnet.grid as grid
@@ -19,6 +21,7 @@ import climnet.utils.time_utils as tu
 import climnet.network.network_functions as nwf
 import climnet.utils.general_utils as gut
 from climnet.tsa import iaaft
+
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -136,6 +139,7 @@ class BaseClimNet:
         nn_points_bw=None,
         link_bundle_folder=None,
     ):
+        reload(lb)
         """Significant test for adjacency. """
         # Get coordinates of all nodes
         coord_deg, coord_rad, map_idx = self.ds.get_coordinates_flatten()
