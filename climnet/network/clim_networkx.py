@@ -247,7 +247,7 @@ class Clim_NetworkX:
     def compute_network_attrs(self, *attr, rc_attr=False):
         reload(nwf)
         if len(attr) == 0:
-            attr = ["degree", "betweenness", "clustering"]
+            attr = ["degree", "betweenness", "clustering_coeff"]
             if 'weight' in self.get_node_attributes():
                 attr += "weight"
         if "degree" in attr:
@@ -265,9 +265,9 @@ class Clim_NetworkX:
             if not self.node_attr_exists(attr="betweenness") or rc_attr is True:
                 self.cnx = nwf.betweenness(netx=self.cnx)
 
-        if "clustering" in attr:
-            if not self.node_attr_exists(attr="clustering") or rc_attr is True:
-                self.cnx = nwf.clustering(netx=self.cnx)
+        if "clustering_coeff" in attr:
+            if not self.node_attr_exists(attr="clustering_coeff") or rc_attr is True:
+                self.cnx = nwf.clustering_coeff(netx=self.cnx)
 
         self.create_ds()
 
