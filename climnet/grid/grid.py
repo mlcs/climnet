@@ -18,11 +18,14 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 import warnings
+import os
 from scipy.spatial.transform import Rotation as Rot
-import climnet.utils.fekete as fk
-import climnet.plots as cplt
+import climnet.grid.fekete as fk
+import geoutils.plotting.plots as cplt
+import geoutils.utils.general_utils as gut
 from importlib import reload
 RADIUS_EARTH = 6371  # radius of earth in km
+PATH = os.path.dirname(os.path.abspath(__file__))
 
 
 class BaseGrid():
@@ -35,6 +38,7 @@ class BaseGrid():
 
     def __init__(self):
         self.grid = None
+        self.savefolder = f'{PATH}/grids/'
         return
 
     def get_distance_equator(self):
@@ -47,7 +51,7 @@ class BaseGrid():
         print("Function should be overwritten by subclasses!")
         return None
 
-    def cut_grid(self, lat_range, lon_range):
+    def cut_grid(self, lon_range, lat_range):
         """Cut the grid in lat and lon range.
 
         TODO: allow taking regions around the date line
@@ -74,6 +78,20 @@ class BaseGrid():
 
         return cutted_grid
 
+    def save(self, filename):
+        savepath = f'{self.savefolder}/{filename}'
+        gut.save_np_dict(self.grid, savepath)
+        print('Done')
+
+    def load(self, filename):
+        savepath = f'{self.savefolder}/{filename}'
+        self.grid = gut.load_np_dict(savepath)
+        x, y, z = spherical2cartesian(lon=self.grid['lon'],
+                                      lat=self.grid['lat']
+                                      )
+        self.X = arange_xyz(x, y, z)
+        print(f'Loaded grid {savepath}!')
+
 
 class GaussianGrid(BaseGrid):
     """Gaussian Grid of the earth which is the classical grid type.
@@ -88,6 +106,7 @@ class GaussianGrid(BaseGrid):
     """
 
     def __init__(self, grid_step_lon, grid_step_lat, grid=None):
+        super().__init__()
         self.grid_step_lon = grid_step_lon
         self.grid_step_lat = grid_step_lat
         self.grid = grid
@@ -121,12 +140,18 @@ class FibonacciGrid(BaseGrid):
         If grid is already computed, e.g. {'lon': [], 'lat': []}. Default: None
     """
 
-    def __init__(self, distance_between_points, grid=None):
+    def __init__(self, distance_between_points,
+                 grid=None,
+                 load_grid=None):
+        super().__init__()
         self.distance = distance_between_points
         self.num_points = self.get_num_points()
         self.grid = grid
-
-        self.create_grid()
+        gut.myprint(f'Try to load grid {load_grid}...')
+        if load_grid is None:
+            self.create_grid()
+        else:
+            self.load(filename=load_grid)
 
     def create_grid(self,
                     ):
@@ -229,7 +254,10 @@ class FeketeGrid(BaseGrid):
 
     def __init__(self, num_points, num_iter=1000,
                  grid=None,
-                 pre_proccess_type=None):
+                 pre_proccess_type=None,
+                 load_grid=None):
+        super().__init__()
+
         self.distance = get_distance_from_num_points(num_points)
         self.num_points = num_points
         self.num_iter = num_iter
@@ -237,9 +265,14 @@ class FeketeGrid(BaseGrid):
         self.grid = grid
         self.reduced_grid = None
 
-        self.create_grid(num_points=self.num_points,
-                         num_iter=self.num_iter,
-                         pre_proccess_type=pre_proccess_type)
+        gut.myprint(f'Try to load grid {load_grid}...')
+
+        if load_grid is None or not os.path.exists(f'{self.savefolder}/{load_grid}'):
+            self.create_grid(num_points=self.num_points,
+                             num_iter=self.num_iter,
+                             pre_proccess_type=pre_proccess_type)
+        else:
+            self.load(filename=load_grid)
 
     def create_grid(self, num_points=None,
                     num_iter=1000,
@@ -403,13 +436,19 @@ def cartesian2spherical(x, y, z):
     return lon, lat
 
 
-def spherical2cartesian(lon, lat):
+def spherical2cartesian(lon, lat, r=1):
     lon = lon * 2 * np.pi / 360
     lat = lat * np.pi / 180
     x = np.cos(lon) * np.cos(lat)
     y = np.sin(lon) * np.cos(lat)
     z = np.sin(lat)
+
     return x, y, z
+
+
+def arange_xyz(x, y, z):
+    X = np.c_[x, y, z]
+    return X
 
 
 def gdistance(pt1, pt2, radius=6371.009):
@@ -521,17 +560,16 @@ if __name__ == "__main__":
     grid_step = 2.5
     dist_equator = degree2distance_equator(grid_step)
     num_points = get_num_points(dist_equator)
-
     # %%
-    Fib = FibonacciGrid(dist_equator)
-    x, y, z = spherical2cartesian(lon=Fib.grid['lon'],
-                                  lat=Fib.grid['lat'])
-    # %%
-    Fek_fib = FeketeGrid(num_points=num_points,
-                         pre_proccess_type='fibonacci')
-
     Fek_rand = FeketeGrid(num_points=num_points,
                           pre_proccess_type=None)
+    grid_type = 'fekete'
+    sp_grid = f'{grid_type}_{grid_step}.npy'
+    Fek_rand.save(filename=sp_grid)
+    # %%
+    Fib = FibonacciGrid(dist_equator)
+    Fek_fib = FeketeGrid(num_points=num_points,
+                         pre_proccess_type='fibonacci')
     # %%
     reload(cplt)
     im = cplt.create_multi_plot(nrows=1, ncols=2,
@@ -547,7 +585,18 @@ if __name__ == "__main__":
     X_rand = fk.points_on_sphere(Fek_rand.num_points)
     fk.plot_spherical_voronoi(X_rand, ax=im['ax'][0])
     fk.plot_spherical_voronoi(Fek_rand.X, ax=im['ax'][1])
-
+    # %%
+    grid_type = 'fekete'
+    sp_grid = f'{grid_type}_{grid_step}.npy'
+    Fek_rand.save(filename=sp_grid)
+    # %%
+    # Load
+    Fek_rand = FeketeGrid(num_points=num_points,
+                          pre_proccess_type=None,
+                          load_grid=sp_grid)
+    x, y, z = spherical2cartesian(Fek_rand.grid['lon'],
+                                  Fek_rand.grid['lat'])
+    X = arange_xyz(x, y, z)
     # %%
     reload(cplt)
     im = cplt.plot_xy(
@@ -568,6 +617,7 @@ if __name__ == "__main__":
     )
     # %%
     # next nearest neigbor distance
+    grid = Fib.grid
     nnn_dists = neighbor_distance(grid['lon'], grid['lat'])
     plt.hist(nnn_dists.flatten(), bins=100)
 

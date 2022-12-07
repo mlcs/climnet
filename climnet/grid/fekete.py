@@ -1,4 +1,3 @@
-#! /usr/bin/env python3
 """
 fekete -  Estimation of Fekete points on a unit sphere
 
@@ -35,7 +34,8 @@ from tqdm import tqdm
 from numba import jit
 from scipy.spatial import SphericalVoronoi
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-import climnet.utils.general_utils as gut
+import geoutils.utils.general_utils as gut
+
 G = 6.67408 * 1E-11         # m^3 / kg / s^2
 
 

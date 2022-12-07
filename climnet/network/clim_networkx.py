@@ -18,8 +18,13 @@ import os
 from tqdm import tqdm
 import multiprocessing as mpi
 from joblib import Parallel, delayed
-import climnet.grid as grid
+import climnet.grid.grid as grid
 import climnet.network.network_functions as nwf
+import climnet.network.corr_network as cnet
+import climnet.network.es_network as esnet
+import climnet.network.link_bundles as lb
+import geoutils.utils.general_utils as gut
+
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(PATH + "/../")  # Adds higher directory
@@ -35,30 +40,43 @@ class Clim_NetworkX:
     """
 
     def __init__(
-        self, dataset, network=None, nx_path_file=None, weighted=False, **kwargs
+        self, dataset, nx_path_file=None, network=None, **kwargs
     ):
 
         self.ds = dataset
-        self.weighted = weighted
-        if nx_path_file is None or os.path.exists(nx_path_file) is False:
-            if network is not None:
-                self.net = network
-                self.corr = network.corr
-            else:
-                raise ValueError("ERROR no network!")
-            self.cnx = self.create(weighted=self.weighted)
+        self.adjacency = None
+        self.corr = None
+        self.is_points = []
+        if network is not None and nx_path_file is not None:
+            raise ValueError(
+                "ERROR both nx_path_file and network are provided, but only 1 can be used! Please choose one of both!")
+        if network is not None:
+            self.create(network=network)
+        elif nx_path_file is None:
+            return
         else:
             self.cnx = self.load(nx_path_file)
 
-        # Check if graph is consistent with network file!
-        self.check_network_dim()
-        self.get_nx_info()
+    def create(self, method='corr', network=None, weighted=False, **kwargs):
 
-    def create(self, weighted=False):
-        # Preprocessing
-        self.adjacency = self.net.adjacency
+        self.weighted = weighted
+        if network is not None:
+            print(f'Create Network based on input network', flush=True)
+            self.adjacency = network.adjacency
+            self.corr = np.where(self.adjacency == 1, network.corr, 0)
+        else:
+            print(f'Create Network based on method {method}', flush=True)
+            if method == 'corr':
+                reload(cnet)
+                self.adjacency, self.corr = cnet.create(
+                    self.ds, **kwargs
+                )
+            elif method == 'es':
+                reload(esnet)
+                self.adjacency, self.corr = esnet.create(
+                    self.ds, **kwargs
+                )
 
-        self.corr = self.net.corr
         if weighted is False:
             self.corr = None
         # ensure square matrix
@@ -67,9 +85,13 @@ class Clim_NetworkX:
         if M != N:
             raise ValueError("Adjacency must be square!")
         self.remove_isolated_nodes()
-        cnx = self.init_cnx()
+        self.cnx = self.init_cnx()
+        self.set_removed_points()
+        # Check if graph is consistent with network file!
+        self.check_network_dim()
+        self.get_nx_info()
 
-        return cnx
+        return self.cnx
 
     def init_cnx(self):
         if self.corr is not None:
@@ -77,15 +99,30 @@ class Clim_NetworkX:
             self.corr = np.where(self.adjacency == 1, self.corr, 0)
             # Taking abs to only have positive weights
             cnx = nx.DiGraph(np.abs(self.corr))
+            cnx = self.set_edge_corr(cnx)
         else:
             cnx = nx.DiGraph(self.adjacency)
 
         self.cnx = self.post_process_cnx(cnx)
+        return self.cnx
+
+    def set_edge_corr(self, cnx):
+        if self.corr is None:
+            raise ValueError(f'ERROR correlation is None!')
+        if self.add_attr2ds is None:
+            raise ValueError(f'ERROR adjacency is None!')
+        print('Set Edge correlation!', flush=True)
+        sids, tids = np.where(self.adjacency == 1)
+        pairs = list(zip(sids, tids))
+        corr_lst = [self.corr[p] for p in pairs]
+        corr_dict = gut.mk_dict_2_lists(pairs, corr_lst)
+
+        nx.set_edge_attributes(cnx, corr_dict, "corr")
         return cnx
 
     def make_network_undirected(self, dense=True):
         # Make sure that adjacency is symmetric (ie. in-degree = out-degree)
-        print(f"Make network undirected with dense={dense}")
+        print(f"Make network undirected with dense={dense}", flush=True)
         self.adjacency, self.corr = nwf.make_network_undirected(
             adjacency=self.adjacency, corr=self.corr, dense=dense
         )
@@ -96,7 +133,25 @@ class Clim_NetworkX:
     def load(self, nx_path_file):
         print(f"Load {nx_path_file}...", flush=True)
         self.cnx = nx.read_gml(nx_path_file, destringizer=int)
+        self.is_degraph()
         self.adjacency = np.where(nx.to_numpy_array(self.cnx) > 0, 1, 0)
+        # self.corr = self.get_attr_array(attr='corr')  # Not all networks have corr
+        # if self.adjacency.shape != self.corr.shape:
+        #     gut.myprint(self.adjacency.shape, self.corr.shape)
+        #     raise ValueError(f'ERROR Corr and adjacency not of same shape!')
+        node_attr = self.get_node_attributes()
+        if 'rempoints' in node_attr:
+            print('Load removal of isolated points...', flush=True)
+            self.is_points = []
+            # Iterate over all nodes that might contain a removed point number
+            for nd, ndata in self.cnx.nodes(data=True):
+                if 'rempoints' in list(ndata.keys()):
+                    self.is_points.append(int(ndata['rempoints']))
+                else:
+                    break
+            self.is_points = np.array(self.is_points)
+            self.ds.mask_point_ids(points=self.is_points)
+            self.ds.re_init()
         is_nodes = nwf.get_isolated_nodes(adjacency=self.adjacency)
         if len(is_nodes) > 0:
             raise ValueError(
@@ -105,7 +160,124 @@ class Clim_NetworkX:
         # self.cnx = nx.relabel.convert_node_labels_to_integers(self.cnx)  # Otherwise node labels are strings!
         self.create_ds()
 
+        # Check if graph is consistent with network file!
+        self.check_network_dim()
+        self.weighted = self.is_weighted()
+        self.get_nx_info()
+
         return self.cnx
+
+    def is_degraph(self):
+        if isinstance(self.cnx, nx.classes.graph.Graph):
+            gut.myprint('WARNING! Undirected graph object!')
+            self.cnx = nx.DiGraph(self.cnx)
+            gut.myprint('Casted to DiGraph object!')
+
+    def is_weighted(self):
+        all_weights = self.get_edge_attr('weight')
+        if int(np.sum(all_weights)) == len(all_weights):  # if all weights are 1 == num edges!
+            weighted = False
+            print('Network is unweighted!')
+        else:
+            weighted = True
+            print('Network is weighted!')
+
+        return weighted
+
+    def save(self, savepath, cnx=None):
+        """Stores the network as gml file. Note, to save memory space, it is
+        useful to store it as .gml.gz files (compressed files).
+
+        Args:
+            savepath (str): file path. good to end with .gml.gz.
+            cnx (climNetworkX, optional): climNetworkx. By default the self.cnx is stored.
+        """
+        if cnx is None:
+            cnx = self.cnx
+        gut.myprint(f" Start saving ClimNetworkx File to {savepath}!")
+
+        self.set_removed_points()
+        cnx = nx.convert_node_labels_to_integers(cnx)
+        nx.write_gml(cnx, savepath)
+        print(f"ClimNetworkx File saved to {savepath}!", flush=True)
+
+    # ########################### Link bundling ########################################
+    def link_bundles(
+        self,
+        num_rand_permutations,
+        num_cpus=mpi.cpu_count(),
+        nn_points_bw=None,
+        link_bundle_folder=None,
+        job_array=False,
+    ):
+        """Significant test for adjacency.
+
+        Args:
+            num_rand_permutations (_type_): _description_
+            num_cpus (_type_, optional): _description_. Defaults to mpi.cpu_count().
+            nn_points_bw (_type_, optional): _description_. Defaults to None.
+            link_bundle_folder (_type_, optional): _description_. Defaults to None.
+            job_array (bool, optional): When True the slurm job array is used to compute the
+                different null model configurations. Defaults to False.
+        """
+        reload(lb)
+        # Get coordinates of all nodes
+        coord_deg, coord_rad, map_idx = self.ds.get_coordinates_flatten()
+
+        # First compute Null Model of old adjacency matrix
+        if link_bundle_folder is None:
+            link_bundle_folder = PATH + f"/link_bundles/{self.ds.var_name}/"
+        else:
+            link_bundle_folder = PATH + f"/link_bundles/{link_bundle_folder}/"
+        null_model_filename = f"link_bundle_null_model_{self.ds.var_name}"
+
+        # Set KDE bandwidth to 2*max_dist_of_points
+        if nn_points_bw is not None:
+            dist_eq = grid.degree2distance_equator(
+                self.ds.grid_step, radius=grid.RADIUS_EARTH
+            )
+            bandwidth = nn_points_bw * dist_eq / grid.RADIUS_EARTH
+        else:
+            bandwidth = None  # Is computed later based on Scott's rule of thumb!
+
+        print(f"Start computing null model of link bundles using {bandwidth}!")
+        lb.link_bundle_null_model(
+            self.adjacency,
+            coord_rad,
+            link_bundle_folder=link_bundle_folder,
+            filename=null_model_filename,
+            num_rand_permutations=num_rand_permutations,
+            num_cpus=num_cpus,
+            bw=bandwidth,
+            job_array=job_array,
+        )
+
+        # Now compute again adjacency corrected by the null model of the link bundles
+        # try:
+        print("Now compute new adjacency matrix!")
+        self.adjacency = lb.link_bundle_adj_matrix(
+            adj_matrix=self.adjacency,
+            coord_rad=coord_rad,
+            null_model_folder=link_bundle_folder,
+            null_model_filename=null_model_filename,
+            bw=bandwidth,
+            perc=999,
+            num_cpus=num_cpus,
+        )
+        # except:
+        #     print(
+        #         "Other jobs for link bundling are not finished yet! Last job will do the rest!"
+        #     )
+        #     sys.exit()
+        # Correct the weight matrix accordingly to the links
+        if self.corr is not None:
+            self.corr = np.where(self.adjacency == 1, self.corr, 0)
+
+        self.lb = True
+        self.remove_isolated_nodes()
+        self.set_removed_points()
+
+        self.cnx = self.init_cnx()
 
     # ########### General Functions for better handeling networkx ###################
 
@@ -113,14 +285,16 @@ class Clim_NetworkX:
         print(nx.info(self.cnx))
         self.sparsity = self.get_sparsity()
         attrs = self.get_node_attributes()
-        print(f"Node attributes: {attrs}")
+        print(f"Node attributes: {attrs}", flush=True)
         ed_attrs = self.get_edge_attributes()
-        print(f"Edge attributes: {ed_attrs}")
+        print(f"Edge attributes: {ed_attrs}", flush=True)
 
     def post_process_cnx(self, cnx):
         for n in tqdm(cnx.nodes):
-            cnx.nodes[n]["lon"] = float(self.ds.ds.points[n].lon)
-            cnx.nodes[n]["lat"] = float(self.ds.ds.points[n].lat)
+            # important to use the correct point ids!
+            pid = self.ds.get_points_for_idx([n])[0]
+            cnx.nodes[n]["lon"] = float(self.ds.ds.points[pid].lon)
+            cnx.nodes[n]["lat"] = float(self.ds.ds.points[pid].lat)
         # for the curvature computation to work, we need to convert the labels first
         cnx = nx.convert_node_labels_to_integers(cnx)
         self.adjacency = np.where(nx.to_numpy_array(cnx) > 0, 1, 0)
@@ -189,10 +363,12 @@ class Clim_NetworkX:
     def remove_isolated_nodes(self):
         isolated_nodes = nwf.get_isolated_nodes(adjacency=self.adjacency)
         # While because maybe remove of lines will create further empty lines
+        is_points = self.ds.get_points_for_idx(
+            isolated_nodes) if len(isolated_nodes) > 0 else []
         while len(isolated_nodes) > 0:
             frac_is = len(isolated_nodes) / len(self.adjacency)
             print(
-                f"WARNING! Removed isolated nodes from network! Frac: {frac_is:.4f}")
+                f"WARNING! Removed isolated nodes from network! Frac: {frac_is:.4f}", flush=True)
             # This removes unconnected nodes as well from the network
             adj_rem_rows = np.delete(
                 self.adjacency, isolated_nodes, axis=0
@@ -221,7 +397,7 @@ class Clim_NetworkX:
                         )
 
             # This masks the nodes as well in the dataset
-            print("Update Dataset as well and remove unconnected nodes")
+            print("Update Dataset as well and remove unconnected nodes", flush=True)
             self.ds.mask_node_ids(isolated_nodes)
             if self.corr is None:
                 isolated_nodes = nwf.get_isolated_nodes(
@@ -229,30 +405,38 @@ class Clim_NetworkX:
             else:
                 # Maybe some weights are 0 even though adjacency is 1
                 isolated_nodes = nwf.get_isolated_nodes(adjacency=self.corr)
+            is_points = np.append(
+                is_points, self.ds.get_points_for_idx(isolated_nodes))
 
         self.ds.re_init()
-
+        self.is_points = np.append(
+            self.is_points, is_points)
         return None
 
-    def save(self, savepath, cnx=None):
-        if cnx is None:
-            cnx = self.cnx
-        print(f"ClimNetworkx File saved to {savepath}!")
-
-        cnx = nx.convert_node_labels_to_integers(cnx)
-        nx.write_gml(cnx, savepath)
+    def set_removed_points(self, points=None):
+        rem_points = self.is_points
+        if points is not None:
+            rem_points = np.append(points, rem_points)
+        rem_points = np.array(rem_points, dtype=int)
+        rem_nodes_dict = gut.mk_dict_2_lists(key_lst=np.arange(len(rem_points)),
+                                             val_lst=rem_points.tolist())  # To list important np.int64 will create Error!
+        nx.set_node_attributes(
+            self.cnx, rem_nodes_dict, name="rempoints")
+        return
 
     # ####################  Compute network attributes ############
 
     def compute_network_attrs(self, *attr, rc_attr=False):
         reload(nwf)
         if len(attr) == 0:
-            attr = ["degree", "betweenness", "clustering_coeff"]
+            attr = ["degree", "betweenness", "clustering"]
             if 'weight' in self.get_node_attributes():
                 attr += "weight"
         if "degree" in attr:
             if not self.node_attr_exists(attr="degree") or rc_attr is True:
-                self.cnx = nwf.degree(netx=self.cnx)
+                self.cnx = nwf.degree(netx=self.cnx, weighted=False)
+                if self.weighted:
+                    self.cnx = nwf.degree(netx=self.cnx, weighted=True)
                 self.cnx = nwf.in_degree(netx=self.cnx)
                 self.cnx = nwf.out_degree(netx=self.cnx)
                 self.cnx = nwf.divergence(netx=self.cnx)
@@ -265,8 +449,8 @@ class Clim_NetworkX:
             if not self.node_attr_exists(attr="betweenness") or rc_attr is True:
                 self.cnx = nwf.betweenness(netx=self.cnx)
 
-        if "clustering_coeff" in attr:
-            if not self.node_attr_exists(attr="clustering_coeff") or rc_attr is True:
+        if "clustering" in attr:
+            if not self.node_attr_exists(attr="clustering") or rc_attr is True:
                 self.cnx = nwf.clustering_coeff(netx=self.cnx)
 
         self.create_ds()
@@ -277,9 +461,10 @@ class Clim_NetworkX:
         node_attr = self.get_node_attributes()
         if attr == "forman":
             attr = "formanCurvature"
-
+        if attr == "ollivier":
+            attr = "ricciCurvature"
         if attr in node_attr:
-            print(f"Attribute {attr} already exists!")
+            print(f"Attribute {attr} already exists!", flush=True)
             return True
         else:
             return False
@@ -291,7 +476,8 @@ class Clim_NetworkX:
         else:
             return False
 
-    def compute_curvature(self, c_type="forman", weighted=False, rc_curv=False):
+    def compute_curvature(self, c_type="forman",
+                          rc_curv=False):
         """Creates Networkx with Forman or Ollivier curvatures
 
         Args:
@@ -307,19 +493,21 @@ class Clim_NetworkX:
 
         tt = time.time()
         if self.weighted:
-            print("ATTENTION! Weighted is True!")
+            print("ATTENTION! Weighted is True!", flush=True)
         # compute the Forman Ricci curvature of the given graph cnx
         if self.node_attr_exists(attr=c_type) and rc_curv is False:
             return self.cnx
         else:
             if c_type == "forman":
                 print(
-                    "\n===== Compute the Forman Ricci curvature of the given graph ====="
+                    "\n===== Compute the Forman Ricci curvature of the given graph =====",
+                    flush=True
                 )
                 rc = FormanRicci(self.cnx, verbose="INFO")
             elif c_type == "ollivier":
                 print(
-                    "\n===== Compute the Ollivier Ricci curvature of the given graph ====="
+                    "\n===== Compute the Ollivier Ricci curvature of the given graph =====",
+                    flush=True
                 )
                 rc = OllivierRicci(
                     self.cnx,
@@ -332,15 +520,17 @@ class Clim_NetworkX:
                 raise ValueError(f"Curvature {c_type} does not exist!")
 
             rc.compute_ricci_curvature()
+            # digraph = nx.DiGraph(rc.G)  # Set Ricci Curvature as DiGraph
             self.cnx = rc.G  # sets the node and edge attributes!
-            print("time elapsed: %s" % (time.time() - tt))
+            print("time elapsed: %s" % (time.time() - tt), flush=True)
 
             return self.cnx
 
     # ################## Network attributes #####################
 
     def is_undirected(self):
-        """Returns True if the the graph is undirected
+        """
+        Returns True if the the graph is undirected
         """
         return np.array_equal(self.adjacency, self.adjacency.T)
 
@@ -355,6 +545,9 @@ class Clim_NetworkX:
     def get_node_attr(self, attr):
         return np.array(list(self.get_node_attr_dict(attr).values()))
 
+    def get_single_node(self, node_number):
+        return self.cnx.nodes[node_number]
+
     def get_node_attr_dict(self, attr):
         return nx.get_node_attributes(self.cnx, attr)
 
@@ -364,8 +557,11 @@ class Clim_NetworkX:
     def get_edge_attr_dict(self, attr):
         return nx.get_edge_attributes(self.cnx, attr)
 
+    def get_attr_array(self, attr):
+        return np.array(nx.attr_matrix(self.cnx, edge_attr=attr))
+
     def create_ds(self):
-        print("Create ds for all attributes present in node 0.")
+        print("Create ds for all attributes present in node 0.", flush=True)
         all_attrs = self.get_node_attributes()
         all_attrs.remove("lat")
         all_attrs.remove("lon")
@@ -440,7 +636,7 @@ class Clim_NetworkX:
         Returns:
             list: list of source-target edges
         """
-        print(attr)
+        print(attr, flush=True)
         el = []
         if upper:
             print(f"Higher than threshold = {th}")
@@ -533,14 +729,15 @@ class Clim_NetworkX:
     def ll_one_row(
         self, row, i,
     ):
-        coord_i = self.ds.get_map_index(i)
         idx_links = np.where(row == 1)[0]
         ll_i = None
         if len(idx_links) > 0:
+            coord_i = self.get_single_node(i)
+
             lon_links = []
             lat_links = []
             for j in idx_links:
-                coord_j = self.ds.get_map_index(j)
+                coord_j = self.get_single_node(j)
                 lon_links.append(coord_j["lon"])
                 lat_links.append(coord_j["lat"])
 
@@ -555,13 +752,23 @@ class Clim_NetworkX:
         return ll_i, i, idx_links
 
     def compute_link_lengths_edges(
-        self, backend="multiprocessing", num_cpus=mpi.cpu_count()
+        self, backend="multiprocessing",
+        num_cpus=1  # Check why parallel is not so fast anymore?
     ):
         """Attribute to each link its spatial length"""
-        print("===== Compute spatial link lenghts of all edges in parallel ===========")
+        gut.myprint(
+            "===== Compute spatial link lenghts of all edges in parallel ===========")
+        undirected = self.is_undirected()
+        if undirected:
+            # Use only 1 half of the adjecency
+            adj_ll = np.tril(self.adjacency)
+            gut.myprint('WARNING! Only use half of adjacency!')
+        else:
+            adj_ll = self.adjacency
+
         link_length = Parallel(n_jobs=num_cpus, backend=backend)(
             delayed(self.ll_one_row)(row, i)
-            for i, row in enumerate(tqdm(self.adjacency))
+            for i, row in enumerate(tqdm(adj_ll))
         )
 
         for ll in link_length:
@@ -570,10 +777,16 @@ class Clim_NetworkX:
                 ll_i, i, j_indices = ll
                 for idx, j in enumerate(j_indices):
                     self.cnx.edges[i, j]["length"] = float(ll_i[idx])
+                    if undirected:
+                        self.cnx.edges[j,
+                                       i]["length"] = self.cnx.edges[i, j]["length"]
 
         return self.cnx
 
-    def get_link_length_distribution(self, var=None, q=None, edge_list=None):
+    def get_link_length_distribution(self,
+                                     var=None,
+                                     q=None,
+                                     edge_list=None):
         """Gets link length distribution for a given variable.txt
 
         Args:
@@ -586,18 +799,21 @@ class Clim_NetworkX:
 
         ll = []
         if var is None:
-            for ne in self.cnx.nodes:
-                for u, v, e in self.cnx.edges(ne, data=True):
-                    ed_l = e["length"]
-                    ll.append(ed_l)
+            ll = self.get_edge_attr(attr='length')
         elif (
             var == "formanCurvature" or var == "betweenness" or var == "ricciCurvature"
         ):
+            # q = None every link is counted twice as incoming and outgoing link
             el = self.get_q_edge_list(attr=var, q=q, edge_list=edge_list)
             # adj = self.net.get_adj_from_edge_list(edge_list=edge_list)
             # ll = self.net.get_link_length_distribution(adjacency=adj)
             for u, v in el:
-                ed = self.cnx[u][v]["length"]
+                try:
+                    ed = self.cnx[u][v]["length"]
+                except:
+                    ed = self.cnx[v][u]["length"]
+                    gut.myprint(
+                        f'WARNING: {u}, {v} only exists ll as {v}, {u}!')
                 ll.append(ed)
 
         ll = np.array(ll)
@@ -649,7 +865,7 @@ class Clim_NetworkX:
         target_ids = self.get_edges_node_ids(source_id)[1, :]
         return target_ids
 
-    def get_spec_loc(self, lon_range, lat_range, attr=None, th=None):
+    def get_spec_loc(self, lon_range, lat_range, attr=None, th=None, dateline=False):
         """Get locations and values of an attribute in a given lon-lat range.
 
         Args:
@@ -680,7 +896,8 @@ class Clim_NetworkX:
             def_map = self.ds.mask
 
         ids, loc_map = self.ds.get_locations_in_range(
-            lon_range=lon_range, lat_range=lat_range, def_map=def_map
+            lon_range=lon_range, lat_range=lat_range, def_map=def_map,
+            dateline=dateline,
         )
 
         return ids, loc_map
@@ -773,7 +990,7 @@ class Clim_NetworkX:
             elif (e[1], e[0]) in edge_attr:
                 node_attr[e[1]] += edge_attr[(e[1], e[0])]
             else:
-                print(f"Edge {e} has no assigned attribute.")
+                print(f"Edge {e} has no assigned attribute.", flush=True)
 
         # Add to networkx
         attr = attribute if q is None else f"{attribute}_q{q}"
@@ -787,17 +1004,21 @@ class Clim_NetworkX:
         return node_attr
 
     def get_edges_nodes_for_region(
-        self, lon_range, lat_range, attribute=None, binary=False, q=None
+        self, lon_range, lat_range, attribute=None, binary=False, q=None,
+        dateline=False,
     ):
-        """Get edge and node properties for a specified region.
+        """Get edges for a lon-lat range
 
         Args:
-            lon_range ([type]): [description]
-            lat_range ([type]): [description]
-            attribute ([type]): [description]
-            q ([type], optional): [description]. Defaults to None.
+            lon_range (list): min lon, max lon_range
+            lat_range (list): min lat, max lat_range
+            attribute (str, optional): specific attribute to filter. Defaults to None.
+            binary (bool, optional): if counts of edges are considered as well. Defaults to False.
+            q (float, optional): in which quantile of attribute. Defaults to None.
+            dateline (bool, optional): If region is over the dateline. Defaults to False.
 
         Returns:
+            Returns:
             el_loc (np.ndarray): Edge list of links from the region
                                 which have the specified attribute
             source_map (xr.dataarray): Map containing the attribute in the region
@@ -811,7 +1032,8 @@ class Clim_NetworkX:
             q = None
         # select region
         ids, source_map = self.get_spec_loc(
-            lon_range=lon_range, lat_range=lat_range, attr=attr, th=None
+            lon_range=lon_range, lat_range=lat_range, attr=attr, th=None,
+            dateline=dateline
         )
 
         # Get all edges and nodes connected to the selected region
@@ -826,10 +1048,12 @@ class Clim_NetworkX:
             num_link_arr = np.where(num_link_arr == 0, np.NaN, 1)
         else:
             num_link_arr[np.where(num_link_arr == 0)[0]] = np.NaN
+        tids = np.sort(np.unique(el_loc[:, 1]))
         target_link_map = self.ds.get_map(num_link_arr)
 
         return dict(el=el_loc,
                     sids=ids,
+                    tids=tids,
                     lon_range=lon_range,
                     lat_range=lat_range,
                     source_map=source_map,
@@ -926,13 +1150,12 @@ class Clim_NetworkX:
             edge_attr = self.get_edge_attr_dict(attr=attr)
             edge_attr_val = self.get_edge_attr(attr=attr)
             edge_attr_norm = (
-                2
-                * (edge_attr_val - np.min(edge_attr_val))
+                2 * (edge_attr_val - np.min(edge_attr_val))
                 / (np.max(edge_attr_val) - np.min(edge_attr_val))
                 - 1
             )
             # Add to networkx
-            print(f"Store normalized {attr} in network.")
+            print(f"Store normalized {attr} in network.", flush=True)
             for n, (i, j) in enumerate(edge_attr):
                 self.cnx.edges[i, j][f"{attr}_norm"] = edge_attr_norm[n]
 
@@ -951,7 +1174,7 @@ class Clim_NetworkX:
             edge_attr_rk = st.rankdata(
                 edge_attr_val, axis=0) / len(edge_attr_val)
             # Add to networkx
-            print(f"Store rank {attr} in network.")
+            print(f"Store rank {attr} in network.", flush=True)
             for n, (i, j) in enumerate(edge_attr):
                 self.cnx.edges[i, j][f"{attr}_rank"] = edge_attr_rk[n]
 
@@ -970,10 +1193,11 @@ class Clim_NetworkX:
         for attr in edge_attrs:
             if attr not in all_attrs:
                 raise ValueError(f"Edge attribute {attr} does not exist!")
-            print(attr)
+            print(attr, flush=True)
             new_node_attr = f"{attr}_{attr_name}"
-            print(f"Get node attr {new_node_attr}...")
-            self.cnx = nwf.set_node_attr(G=self.cnx, attr=new_node_attr, norm=norm)
+            print(f"Get node attr {new_node_attr}...", flush=True)
+            self.cnx = nwf.set_node_attr(
+                G=self.cnx, attr=new_node_attr, norm=norm)
 
             self.correct_node_attr(attr=new_node_attr, q=0.5)
 
@@ -1000,7 +1224,7 @@ class Clim_NetworkX:
         for attr in edge_attrs:
             if attr not in all_attrs:
                 raise ValueError(f"Edge attribute {attr} does not exist!")
-            print(attr)
+            print(attr, flush=True)
             edge_attr = self.get_edge_attr(attr)
             for q in q_values:
                 print(q)
@@ -1048,9 +1272,9 @@ class Clim_NetworkX:
             num_nansnow = np.count_nonzero(np.isnan(node_vals))
             if num_nansnow > 0:
                 raise ValueError(
-                    f"{attr}: Still {num_nans} nans remained in nodes!")
+                    f"{attr}: Still {num_nans} nans remained in nodes!", flush=True)
         else:
-            print(f"{attr}: No nans in nodes, nothing to correct!")
+            print(f"{attr}: No nans in nodes, nothing to correct!", flush=True)
 
     # ##################### NetworkIt #######################
     def get_nk_graph(self):
