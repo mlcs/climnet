@@ -2,7 +2,14 @@
 Repository for creating and working with climate networks.
 
 
-## Installation
+## Clone the repo and install all required packages 
+
+### 1. Clone repository with submodules:
+```
+git clone --recurse-submodules git@github.com:mlcs/climnet.git
+```
+
+### 2. Installing packages
 
 Due to dependencies we recommend using conda. We provided a list of packages in the 
 'condaEnv.yml' file. The following steps set up a new environment with all required packages:
