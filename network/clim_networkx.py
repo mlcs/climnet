@@ -46,7 +46,7 @@ class Clim_NetworkX:
         self.ds = dataset
         self.adjacency = None
         self.corr = None
-        self.is_points = []
+        self.reset_is_points_arr()
         if network is not None and nx_path_file is not None:
             raise ValueError(
                 "ERROR both nx_path_file and network are provided, but only 1 can be used! Please choose one of both!")
@@ -86,7 +86,6 @@ class Clim_NetworkX:
             raise ValueError("Adjacency must be square!")
         self.remove_isolated_nodes()
         self.cnx = self.init_cnx()
-        self.set_removed_points()
         # Check if graph is consistent with network file!
         self.check_network_dim()
         self.get_nx_info()
@@ -106,6 +105,24 @@ class Clim_NetworkX:
         self.cnx = self.post_process_cnx(cnx)
         return self.cnx
 
+    def post_process_cnx(self, cnx):
+        gut.myprint(f'Set dataset attributes to network....')
+        for n in tqdm(cnx.nodes):
+            # important to use the correct point ids!
+            pid = self.ds.get_points_for_idx([n])[0]
+            cnx.nodes[n]["lon"] = float(self.ds.ds.points[pid].lon)
+            cnx.nodes[n]["lat"] = float(self.ds.ds.points[pid].lat)
+        # for the curvature computation to work, we need to convert the labels first
+        cnx = nx.convert_node_labels_to_integers(cnx)
+        # self.adjacency = np.where(nx.to_numpy_array(cnx) > 0, 1, 0)  # Check again why this is wrong!
+        self.cnx = cnx
+        self.check_network_dim()
+
+        if self.corr is not None:
+            self.set_corr_edges()
+
+        return cnx
+
     def set_edge_corr(self, cnx):
         if self.corr is None:
             raise ValueError(f'ERROR correlation is None!')
@@ -122,7 +139,7 @@ class Clim_NetworkX:
 
     def make_network_undirected(self, dense=True):
         # Make sure that adjacency is symmetric (ie. in-degree = out-degree)
-        print(f"Make network undirected with dense={dense}", flush=True)
+        gut.myprint(f"Make network undirected with dense={dense}")
         self.adjacency, self.corr = nwf.make_network_undirected(
             adjacency=self.adjacency, corr=self.corr, dense=dense
         )
@@ -131,8 +148,10 @@ class Clim_NetworkX:
         return
 
     def load(self, nx_path_file):
-        print(f"Load {nx_path_file}...", flush=True)
+        gut.myprint(f"Load {nx_path_file}...")
         self.cnx = nx.read_gml(nx_path_file, destringizer=int)
+        gut.myprint(f"... Loading {nx_path_file} successful!")
+
         self.is_degraph()
         self.adjacency = np.where(nx.to_numpy_array(self.cnx) > 0, 1, 0)
         # self.corr = self.get_attr_array(attr='corr')  # Not all networks have corr
@@ -141,7 +160,7 @@ class Clim_NetworkX:
         #     raise ValueError(f'ERROR Corr and adjacency not of same shape!')
         node_attr = self.get_node_attributes()
         if 'rempoints' in node_attr:
-            print('Load removal of isolated points...', flush=True)
+            gut.myprint('Load removal of isolated points...')
             self.is_points = []
             # Iterate over all nodes that might contain a removed point number
             for nd, ndata in self.cnx.nodes(data=True):
@@ -184,7 +203,7 @@ class Clim_NetworkX:
 
         return weighted
 
-    def save(self, savepath, cnx=None):
+    def save(self, savepath, ds_savepath=None, cnx=None):
         """Stores the network as gml file. Note, to save memory space, it is
         useful to store it as .gml.gz files (compressed files).
 
@@ -199,7 +218,11 @@ class Clim_NetworkX:
         self.set_removed_points()
         cnx = nx.convert_node_labels_to_integers(cnx)
         nx.write_gml(cnx, savepath)
-        print(f"ClimNetworkx File saved to {savepath}!", flush=True)
+        gut.myprint(f"ClimNetworkx File saved to {savepath}!")
+        if ds_savepath is not None:
+            gut.myprint(
+                f" Start saving as well dataset File to {ds_savepath}!")
+            self.ds.save(filepath=ds_savepath)
 
     # ########################### Link bundling ########################################
     def link_bundles(
@@ -240,7 +263,8 @@ class Clim_NetworkX:
         else:
             bandwidth = None  # Is computed later based on Scott's rule of thumb!
 
-        print(f"Start computing null model of link bundles using {bandwidth}!")
+        gut.myprint(
+            f"Start computing null model of link bundles using {bandwidth}!")
         lb.link_bundle_null_model(
             self.adjacency,
             coord_rad,
@@ -254,7 +278,7 @@ class Clim_NetworkX:
 
         # Now compute again adjacency corrected by the null model of the link bundles
         # try:
-        print("Now compute new adjacency matrix!")
+        gut.myprint("Now compute new adjacency matrix!")
         self.adjacency = lb.link_bundle_adj_matrix(
             adj_matrix=self.adjacency,
             coord_rad=coord_rad,
@@ -275,36 +299,10 @@ class Clim_NetworkX:
 
         self.lb = True
         self.remove_isolated_nodes()
-        self.set_removed_points()
 
         self.cnx = self.init_cnx()
 
     # ########### General Functions for better handeling networkx ###################
-
-    def get_nx_info(self):
-        print(nx.info(self.cnx))
-        self.sparsity = self.get_sparsity()
-        attrs = self.get_node_attributes()
-        print(f"Node attributes: {attrs}", flush=True)
-        ed_attrs = self.get_edge_attributes()
-        print(f"Edge attributes: {ed_attrs}", flush=True)
-
-    def post_process_cnx(self, cnx):
-        for n in tqdm(cnx.nodes):
-            # important to use the correct point ids!
-            pid = self.ds.get_points_for_idx([n])[0]
-            cnx.nodes[n]["lon"] = float(self.ds.ds.points[pid].lon)
-            cnx.nodes[n]["lat"] = float(self.ds.ds.points[pid].lat)
-        # for the curvature computation to work, we need to convert the labels first
-        cnx = nx.convert_node_labels_to_integers(cnx)
-        self.adjacency = np.where(nx.to_numpy_array(cnx) > 0, 1, 0)
-        self.cnx = cnx
-        self.check_network_dim()
-
-        if self.corr is not None:
-            self.set_corr_edges()
-
-        return cnx
 
     def check_network_dim(self):
         g_N = self.cnx.number_of_nodes()
@@ -312,6 +310,12 @@ class Clim_NetworkX:
         if g_N != len(self.ds.indices_flat):
             raise ValueError(
                 f"Too many indices in graph: {g_N} vs {len(self.ds.indices_flat)}!"
+            )
+
+        adj_len = self.adjacency.shape[0]
+        if g_N != adj_len:
+            raise ValueError(
+                f"Different number of nodes {g_N} than adjacency shape {adj_len}!"
             )
 
         ed_num_net = np.count_nonzero(self.adjacency)
@@ -355,10 +359,72 @@ class Clim_NetworkX:
         sparsity = nwf.get_sparsity(M=self.adjacency)
         return sparsity
 
+    def get_nx_info(self):
+        reload(nwf)
+        # print(nx.info(self.cnx))  # depracted in networkx3
+        num_nodes = self.cnx.number_of_nodes()
+        num_edges = self.cnx.number_of_edges()
+        sparsity = nwf.get_sparsity(M=self.adjacency, verbose=False)
+        attrs = self.get_node_attributes()
+        ed_attrs = self.get_edge_attributes()
+
+        nx_info_dict = {'Num_nodes': num_nodes, 'Num_edges': num_edges,
+                        'sparsity': sparsity,
+                        'Node_attrs': attrs, 'Edge_attrs': ed_attrs}
+
+        gut.myprint(f'Network Info: {nx_info_dict}')
+
+        return nx_info_dict
+
     def get_threshold(self):
         all_e_vals = self.get_edge_attr("weight")
         min_val = np.min(all_e_vals)
         return min_val
+
+    def remove_nodes_from_adjacency(self, idx_list):
+        """Removes list of indices row and column wise from the adjacency matrix
+        and also the correlation matrix.
+
+        Args:
+            idx_list (list): list of indices
+
+        Raises:
+            ValueError:
+            ValueError:
+        """
+        frac_is = len(idx_list) / len(self.adjacency)
+        gut.myprint(
+            f"WARNING! Removed nodes from network! Fraction: {frac_is:.4f}")
+        # This removes unconnected nodes as well from the network
+        adj_rem_rows = np.delete(
+            self.adjacency, idx_list, axis=0
+        )  # Delete rows
+        adj_rem_cols_rows = np.delete(
+            adj_rem_rows, idx_list, axis=1
+        )  # Delete columns
+        M, N = adj_rem_cols_rows.shape
+        if M != N:
+            raise ValueError(
+                f"Deleted different number of rows{M} and columns {N}")
+        else:
+            self.adjacency = adj_rem_cols_rows
+
+            if self.corr is not None:
+                corr_rows = np.delete(
+                    self.corr, idx_list, axis=0
+                )  # Delete rows
+                self.corr = np.delete(
+                    corr_rows, idx_list, axis=1
+                )  # Delete columns
+
+                if self.corr.shape != self.adjacency.shape:
+                    raise ValueError(
+                        f"Corr shape {self.corr.shape} != Adj shape {self.adjacency.shape}!"
+                    )
+        return
+
+    def reset_is_points_arr(self):
+        self.is_points = np.array([])
 
     def remove_isolated_nodes(self):
         isolated_nodes = nwf.get_isolated_nodes(adjacency=self.adjacency)
@@ -366,38 +432,11 @@ class Clim_NetworkX:
         is_points = self.ds.get_points_for_idx(
             isolated_nodes) if len(isolated_nodes) > 0 else []
         while len(isolated_nodes) > 0:
-            frac_is = len(isolated_nodes) / len(self.adjacency)
-            print(
-                f"WARNING! Removed isolated nodes from network! Frac: {frac_is:.4f}", flush=True)
-            # This removes unconnected nodes as well from the network
-            adj_rem_rows = np.delete(
-                self.adjacency, isolated_nodes, axis=0
-            )  # Delete rows
-            adj_rem_cols_rows = np.delete(
-                adj_rem_rows, isolated_nodes, axis=1
-            )  # Delete columns
-            M, N = adj_rem_cols_rows.shape
-            if M != N:
-                raise ValueError(
-                    f"Deleted different number of rows{M} and columns {N}")
-            else:
-                self.adjacency = adj_rem_cols_rows
-
-                if self.corr is not None:
-                    corr_rows = np.delete(
-                        self.corr, isolated_nodes, axis=0
-                    )  # Delete rows
-                    self.corr = np.delete(
-                        corr_rows, isolated_nodes, axis=1
-                    )  # Delete columns
-
-                    if self.corr.shape != self.adjacency.shape:
-                        raise ValueError(
-                            f"Corr shape {self.corr.shape} != Adj shape {self.adjacency.shape}!"
-                        )
+            # Remove nodes from adjacency
+            self.remove_nodes_from_adjacency(idx_list=isolated_nodes)
 
             # This masks the nodes as well in the dataset
-            print("Update Dataset as well and remove unconnected nodes", flush=True)
+            gut.myprint("Update Dataset as well and remove unconnected nodes")
             self.ds.mask_node_ids(isolated_nodes)
             if self.corr is None:
                 isolated_nodes = nwf.get_isolated_nodes(
@@ -411,10 +450,25 @@ class Clim_NetworkX:
         self.ds.re_init()
         self.is_points = np.append(
             self.is_points, is_points)
+        self.set_removed_points()
+
         return None
+
+    def remove_nodes_from_network(self, node_list):
+        self.remove_nodes_from_adjacency(idx_list=node_list)
+        self.init_cnx()  # This reinitializes the nx object with nx.Graph()
+        return
 
     def set_removed_points(self, points=None):
         rem_points = self.is_points
+        # Consistency check
+        max_num_points = len(self.ds.ds.points)
+
+        max_rem_pid = np.max(rem_points) if len(rem_points) > 0 else 0
+        if max_rem_pid >= max_num_points:
+            raise ValueError(
+                f'To remove ids {max_rem_pid} >= number of datapoints {max_num_points}!')
+
         if points is not None:
             rem_points = np.append(points, rem_points)
         rem_points = np.array(rem_points, dtype=int)
@@ -422,6 +476,26 @@ class Clim_NetworkX:
                                              val_lst=rem_points.tolist())  # To list important np.int64 will create Error!
         nx.set_node_attributes(
             self.cnx, rem_nodes_dict, name="rempoints")
+        return
+
+    def cut_network(self, lon_range=None, lat_range=None, dateline=False):
+        gut.myprint(f'Cut the dataset first...')
+        rem_dict = self.ds.cut_ds(lon_range=lon_range, lat_range=lat_range,
+                                  dateline=dateline)
+        rem_node_ids = rem_dict['remove_idx']
+        self.remove_nodes_from_network(node_list=rem_node_ids)
+        gut.myprint('Reset isolated points...')
+        # Reset previously removed point number
+        self.reset_is_points_arr()
+
+        # Remove nodes that are maybe now isolated
+        gut.myprint('Remove possibly newly isolated nodes')
+        self.remove_isolated_nodes()
+        gut.myprint('Re-Init the new network')
+        self.init_cnx()
+        self.check_network_dim()
+        gut.myprint('Finished setting up network!')
+        self.get_nx_info()
         return
 
     # ####################  Compute network attributes ############
@@ -895,12 +969,13 @@ class Clim_NetworkX:
         else:
             def_map = self.ds.mask
 
-        ids, loc_map = self.ds.get_locations_in_range(
+        loc_dict = self.ds.get_locations_in_range(
             lon_range=lon_range, lat_range=lat_range, def_map=def_map,
             dateline=dateline,
         )
-
-        return ids, loc_map
+        ids = loc_dict['idx']
+        mmap = loc_dict['mmap']
+        return ids, mmap
 
     def get_edges_node_ids(self, *ids_lst):
         """Gets the outgoing edges to a list of node ids (i.e. the node id is the source).

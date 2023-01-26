@@ -5,6 +5,7 @@ from importlib import reload
 import climnet.datasets.dataset as cds
 import geoutils.utils.general_utils as gut
 import geoutils.utils.time_utils as tu
+import copy
 reload(cds)
 
 
@@ -44,7 +45,8 @@ class EvsDataset(cds.BaseDataset):
             large_ds=large_ds,
             timemean=timemean,
             lsm=lsm,
-            init_indices=False,  # Indices are later initialized with evs mask
+            can=can,
+            init_mask=False,  # Mask and Indices are later initialized with evs mask
             **kwargs,
         )
 
@@ -61,8 +63,8 @@ class EvsDataset(cds.BaseDataset):
             rrevs = kwargs.pop("rrevs")
         # compute event synch if not given in nc file
         if "evs" in self.vars:
-            gut.myprint("Evs are already stored in dataset.")
-        elif var_name is None:
+            gut.myprint("Evs datat is stored in dataset.")
+        elif self.var_name is None:
             raise ValueError("Specify varname to compute event sync.")
         else:
             gut.myprint(
@@ -70,7 +72,7 @@ class EvsDataset(cds.BaseDataset):
             )
             rrevs = True
         if rrevs is True:
-            if var_name is None:
+            if self.var_name is None:
                 var_name = self.var_name
 
             self.ds = self.create_evs_ds(
@@ -85,6 +87,7 @@ class EvsDataset(cds.BaseDataset):
             self.mask = self.get_es_mask(self.ds["evs"], min_evs=self.min_evs)
             self.init_map_indices()
         self.vars = self.get_vars()
+        self.var_name = 'evs'
 
     def create_evs_ds(
         self, var_name, q=0.95, th=1, th_eev=15, min_evs=20, month_range=None
@@ -226,44 +229,33 @@ class EvsDataset(cds.BaseDataset):
         return self.ds
 
     def get_es_mask(self, data_evs, min_evs):
+        gut.myprint(f'Init spatial evs-mask for EVS data of shape: {data_evs.shape}')
         num_non_nan_occurence = data_evs.where(data_evs == 1).count(dim="time")
-        self.mask = xr.where(num_non_nan_occurence > min_evs, 1, 0)
+        mask = xr.where(num_non_nan_occurence > min_evs, 1, 0)
         self.min_evs = min_evs
+        self.mask = xr.DataArray(
+                data=mask,
+                dims=mask.dims,
+                coords=mask.coords,
+                name="mask",
+            )
+        gut.myprint(f'... Finished Initialization EVS-spatial mask')
+
         return self.mask
 
     def set_ds_attrs(self, ds):
         param_class = {
             "grid_step": self.grid_step,
             "grid_type": self.grid_type,
-            "lsm": int(self.lsm),
             "q": self.q,
             "min_evs": self.min_evs,
             "min_threshold": self.min_treshold,
             "th_eev": self.th_eev,
-            "th": self.th,
             "an": int(self.can),
+            **self.info_dict
         }
         ds.attrs = param_class
         return ds
-
-    def save(self, file):
-        """Save the dataset class object to file.
-        Args:
-        ----
-        filepath: str
-        """
-        filepath = os.path.dirname(file)
-
-        if os.path.exists(file):
-            gut.myprint("File" + file + " already exists!")
-            os.rename(file, file + "_backup")
-        if not os.path.exists(filepath):
-            os.makedirs(filepath)
-        gut.myprint(f"Save file {file}")
-        ds_temp = self.set_ds_attrs(self.ds)
-        ds_temp.to_netcdf(file)
-
-        return None
 
     def load_evs_attrs(self):
         self.q = self.ds.attrs["q"]

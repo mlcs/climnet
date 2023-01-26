@@ -5,6 +5,7 @@ Base class for the different dataset classes of the multilayer climate network.
 
 import os
 import numpy as np
+import copy
 import scipy.interpolate as interp
 import xarray as xr
 import climnet.grid.grid as grid
@@ -52,7 +53,6 @@ class BaseDataset(bds.BaseDataset):
         lat_range=[-90, 90],
         grid_step=1,
         grid_type="fekete",
-        lsm=False,
         can=False,
         large_ds=False,
         timemean=None,
@@ -71,75 +71,50 @@ class BaseDataset(bds.BaseDataset):
                 gut.myprint(f"You are here: {PATH}!")
                 raise ValueError(f"File does not exist {data_nc}!")
 
-            if large_ds is True:
-                ds = self.open_large_ds(
-                    var_name=var_name,
-                    data_nc=data_nc,
-                    time_range=time_range,
-                    grid_step=grid_step,
-                    **kwargs,
-                )
-            else:
-                ds = xr.open_dataset(data_nc)
+            ds = self.open_ds(
+                nc_file=data_nc,
+                var_name=var_name,
+                data_nc=data_nc,
+                time_range=time_range,
+                lon_range=lon_range,
+                lat_range=lat_range,
+                grid_step=None,  # Do not interpolate yet!
+                large_ds=large_ds,
+                **kwargs,
+            )
 
-            ds = self.check_dimensions(ds, **kwargs)  # check dimensions
-            ds = self.rename_var(ds)  # rename specific variable names
-            self.grid_step = grid_step
-            self.grid_type = grid_type
-            self.lsm = lsm
             self.info_dict = kwargs
-
-            # choose time range
-            if time_range is not None:
-                ds = self.get_data_timerange(ds, time_range)
 
             if timemean is not None:
                 ds = tu.apply_timemean(ds, timemean=timemean)
 
-            # regridding
-            self.GridClass = self.create_grid(
-                grid_type=self.grid_type, **kwargs,)
-            if lon_range != [-180, 180] and lat_range != [-90, 90]:
-                ds = self.cut_map(ds=ds, lon_range=lon_range,
-                                  lat_range=lat_range)
+            self.grid = self.init_grid(
+                ds, grid_step=grid_step, grid_type=grid_type, **kwargs)
 
-            self.grid = self.GridClass.cut_grid(
-                lat_range=[ds["lat"].min().data, ds["lat"].max().data],
-                lon_range=[ds["lon"].min().data, ds["lon"].max().data],
-            )
+            self.set_var(var_name=var_name, ds=ds)
+            da = ds[self.var_name]
 
-            da = ds[var_name]
-            # Bring always in the form (time, lat, lon)
-            # much less memory consuming than for dataset!
-            gut.myprint("transpose data!")
-            da = da.transpose("time", "lat", "lon")
+            # regridding to Climnet Grid (eg. Fekete)
             da = self.interp_grid(da, self.grid)
 
             if large_ds is True:
                 ds.unify_chunks()
 
-            if self.lsm is True:
-                mask_lsm, _ = self.get_land_sea_mask_data(da)
-            else:
-                mask_lsm = None
             self.ds = da.to_dataset(name=var_name)
             (
                 self.time_range,
                 self.lon_range,
                 self.lat_range,
             ) = self.get_spatio_temp_range(ds)
-            self.mask = self.init_mask(da=da, mask_ds=mask_lsm)
+
+            # Init mask
+            self.mask = self.init_mask(da=da, **kwargs)
 
         # load dataset object from file
         elif load_nc is not None:
-            self.load(load_nc)
-            if timemean is not None:
-                self.ds = self.apply_timemean(timemean=timemean)
-            if time_range is not None:
-                self.ds = self.get_data_timerange(
-                    self.ds, time_range=time_range)
-                self.time_range = time_range
-
+            self.load(load_nc, **kwargs)
+        else:
+            raise ValueError(f'No data source provided!')
         # select a main var name
         self.vars = list(self.ds.keys())
         self.var_name = var_name if var_name is not None else self.vars[0]
@@ -154,15 +129,9 @@ class BaseDataset(bds.BaseDataset):
         if self.can is True:
             self.compute_anomalies_ds(kwargs)
 
-        # Flatten index in map
-        # Predefined variables set to None
-        init_indices = kwargs.pop('init_indices', True)
-        if init_indices:
-            self.indices_flat, self.idx_map = self.init_map_indices()
-
-        if load_nc is None:
-            self.ds = self.ds.assign_coords(
-                idx_flat=("points", self.idx_map.data))
+        # if load_nc is None:
+        #     self.ds = self.ds.assign_coords(
+        #         idx_flat=("points", self.idx_map.data))
 
         self.loc_dict = dict()
 
@@ -189,7 +158,7 @@ class BaseDataset(bds.BaseDataset):
 
         return ds
 
-    def load(self, load_nc):
+    def load(self, load_nc, **kwargs):
         """Load dataset object from file.
 
         Parameters:
@@ -217,30 +186,44 @@ class BaseDataset(bds.BaseDataset):
 
             self.grid_step = ds.attrs["grid_step"]
             self.grid_type = ds.attrs["grid_type"]
-            self.lsm = bool(ds.attrs["lsm"])
-            self.info_dict = ds.attrs  # TODO
+            self.grid = self.update_grid(ds=ds)
+            self.info_dict = copy.deepcopy(ds.attrs)  # TODO
             # Read and create grid class
-            self.grid = dict(lat=ds.lat.data, lon=ds.lon.data)
-            for name, da in ds.data_vars.items():
-                gut.myprint(f"Variables in dataset: {name}")
+            vars = self.get_vars(ds=ds)
+            gut.myprint(f"Variables in dataset: {vars}")
 
+            # if 'evs' in vars:
+            #     name = 'evs'
             # points which are always NaN will be NaNs in mask
-            mask = np.ones_like(ds[name][0].data, dtype=bool)
-            for idx, t in enumerate(ds.time):
-                mask *= np.isnan(ds[name].sel(time=t).data)
+            # mask = np.ones_like(ds[name][0].data, dtype=bool)
+            # tp_0, _ = tu.get_start_end_date(data=ds)
+            # mask = np.ones_like(ds[name].sel(time=tp_0).data, dtype=bool)
 
-            self.mask = xr.DataArray(
-                data=xr.where(mask == 0, 1, np.NaN),  # or mask == False
-                dims=da.sel(time=da.time[0]).dims,
-                coords=da.sel(time=da.time[0]).coords,
-                name="lsm",
-            )
+            # for idx, t in enumerate(ds.time):
+            #     mask *= np.isnan(ds[name].sel(time=t).data)
 
+            # self.mask = xr.DataArray(
+            #     data=xr.where(mask == 0, 1, np.NaN),  # or mask == False
+            #     dims=da.sel(time=da.time[0]).dims,
+            #     coords=da.sel(time=da.time[0]).coords,
+            #     name="mask",
+            # )
+            ds = ds.transpose('time', 'points').compute()
             ds = self.check_time(ds)
-
+            self.set_var(ds=ds)
             self.ds = ds
 
+            self.init_mask(da=ds[self.var_name], **kwargs)
         return self.ds
+
+    def set_ds_attrs(self, ds):
+        param_class = {
+            "grid_step": self.grid_step,
+            "grid_type": self.grid_type,
+            "an": int(self.can),
+        }
+        ds.attrs = param_class
+        return ds
 
     def save(self, filepath):
         """Save the dataset class object to file.
@@ -256,14 +239,7 @@ class BaseDataset(bds.BaseDataset):
         if not os.path.exists(dirname):
             os.makedirs(dirname)
 
-        param_class = {
-            "grid_step": self.grid_step,
-            "grid_type": self.grid_type,
-            "lsm": int(self.lsm),
-            **self.info_dict,
-        }
-        ds_temp = self.ds
-        ds_temp.attrs = param_class
+        ds_temp = self.set_ds_attrs(self.ds)
         ds_temp.to_netcdf(filepath)
         gut.myprint(f"File {filepath} written!")
         return None
@@ -303,24 +279,29 @@ class BaseDataset(bds.BaseDataset):
 
         return ds
 
-    def create_grid(self, grid_type="fibonacci", num_iter=1000, **kwargs):
+    def init_grid(self, ds, grid_step=1,
+                  grid_type="fekete", **kwargs):
         """Common grid for all datasets.
 
-        ReturnL
+        Return+
         -------
         Grid: grid.BaseGrid
         """
         reload(grid)
+        self.grid_step = grid_step
+        self.grid_type = grid_type
+
         dist_equator = grid.degree2distance_equator(self.grid_step)
         sp_grid = kwargs.pop("sp_grid", None)
         gut.myprint(f"Start create grid {grid_type}...")
         if grid_type == "gaussian":
-            Grid = grid.GaussianGrid(self.grid_step, self.grid_step)
+            self.grid = grid.GaussianGrid(self.grid_step, self.grid_step)
         elif grid_type == "fibonacci":
-            Grid = grid.FibonacciGrid(dist_equator)
+            self.grid = grid.FibonacciGrid(dist_equator)
         elif grid_type == "fekete":
             num_points = grid.get_num_points(dist_equator)
-            Grid = grid.FeketeGrid(
+            num_iter = kwargs.pop('num_iter', 1000)
+            self.grid = grid.FeketeGrid(
                 num_points=num_points,
                 num_iter=num_iter,
                 pre_proccess_type=None,
@@ -329,7 +310,29 @@ class BaseDataset(bds.BaseDataset):
         else:
             raise ValueError(f"Grid type {grid_type} does not exist.")
 
-        return Grid
+        min_lon = int(np.around(ds["lon"].min().data, decimals=0))
+        max_lon = int(np.around(ds["lon"].max().data, decimals=0))
+        min_lat = int(np.around(ds["lat"].min().data, decimals=0))
+        max_lat = int(np.around(ds["lat"].max().data, decimals=0))
+
+        max_lon = max_lon if max_lon <= 180 else 180
+        min_lon = min_lon if min_lon >= -180 else -180
+        max_lat = max_lat if max_lat >= 90 else 90
+        min_lat = min_lat if min_lat >= -90 else -90
+
+        if [min_lon, max_lon] != [-180, 180] or [min_lat, max_lat] != [-90, 90]:
+            self.grid = self.grid.cut_grid(
+                lat_range=[min_lat, max_lat],
+                lon_range=[min_lon, max_lon],
+            )
+        else:
+            # do not use the Fekete class object but the lat-lon dictionary
+            self.grid = self.grid.grid
+        return self.grid
+
+    def update_grid(self, ds):
+        self.grid = dict(lon=ds.lon, lat=ds.lat)
+        return self.grid
 
     def interp_grid(self, dataarray, new_grid):
         """Interpolate dataarray on new grid.
@@ -409,6 +412,11 @@ class BaseDataset(bds.BaseDataset):
         """
         if len(points) > 0:
             self.mask[points] = int(0)
+            # xarray has problems with directly using np.nan
+            self.ds.loc[dict(points=points)] = -999
+            self.ds = xr.where(self.ds == -999, np. nan, self.ds)
+            gut.myprint(f'Deleted {len(points)} points from dataset...')
+
             self.init_map_indices()
         return
 
@@ -467,7 +475,7 @@ class BaseDataset(bds.BaseDataset):
         for point in point_lst:
             idx_lst.append(self.get_idx_for_point(point=point))
 
-        return np.array(idx_lst)
+        return np.array(idx_lst, dtype=int)
 
     def get_coordinates_flatten(self):
         """Get coordinates of flatten array with removed NaNs.
@@ -547,7 +555,52 @@ class BaseDataset(bds.BaseDataset):
         def_point_list = np.intersect1d(defined_points, point_lst_range)
         idx_lst = self.get_idx_point_lst(point_lst=def_point_list)
 
-        return idx_lst, mmap
+        return {'idx': idx_lst,
+                'mmap': mmap,
+                'all_points': point_lst_range,
+                'def_points': def_point_list
+                }
+
+    def cut_ds(self, lon_range=None, lat_range=None, dateline=False):
+        all_pids = self.ds.points
+        all_def_points = list(self.key_val_idx_point_dict.values())
+
+        loc_dict = self.get_locations_in_range(lon_range=lon_range,
+                                               lat_range=lat_range,
+                                               dateline=dateline)
+        pids = loc_dict['all_points']  # includes also masked points!
+        # Because columns are much faster to select and drop!
+        old_ds = self.ds.transpose('time', 'points').compute()
+        to_remove_pids = gut.get_a_not_b(all_pids, pids)
+        def_remove_pids = gut.get_intersect_a_b(all_def_points, to_remove_pids)
+        # Needed for combination with network nodes
+        to_remove_idx = self.get_idx_point_lst(point_lst=def_remove_pids)
+
+        new_ds = old_ds.drop_sel(points=to_remove_pids).transpose(
+            'time', 'points').compute()
+        self.grid = self.update_grid(ds=new_ds)
+        new_ds = new_ds.assign_coords(
+            points=np.arange(0, len(self.grid['lon']), 1))
+        gut.myprint(
+            f'Updated Dataset to range lon {lon_range}, lat {lat_range}!')
+        self.mask = self.mask.drop_sel(points=to_remove_pids).assign_coords(
+            points=np.arange(0, len(self.grid['lon']), 1))
+        if self.idx_map is not None:
+            self.indices_flat, self.idx_map = self.init_map_indices()
+
+        self.ds = new_ds
+
+        gut.myprint(f'Finished cutting the dataset!')
+
+        return {'ds': self.ds,
+                'remove_pids': to_remove_pids,
+                'remove_idx': to_remove_idx,
+                }
+
+    def get_defined_ds(self):
+        all_def_pids = list(self.key_val_idx_point_dict.values())
+        def_data = self.ds.sel(points=all_def_pids)
+        return def_data
 
 
 class AnomalyDataset(BaseDataset):
