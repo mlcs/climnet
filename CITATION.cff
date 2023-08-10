@@ -4,5 +4,5 @@ authors:
   - family-names: Strnad, Schloer
     given-names: Felix, Jakob
 title: mlcs/climnet: Event Sychnronization networks
-version: v2.0.0
-date-released: 2023-01-26
+version: v2.1.0
+date-released: 2023-08-10
