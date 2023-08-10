@@ -3,7 +3,8 @@ import networkx as nx
 import networkit as nk
 import numpy as np
 import climnet.community_detection.cd_functions as cdf
-import climnet.utils.general_utils as gut
+import geoutils.utils.general_utils as gut
+import geoutils.utils.file_utils as fut
 
 
 def get_hard_cluster(nk_partition):
@@ -29,6 +30,7 @@ def apply_nk_cluster(cnk, cd_name="PLM"):
 
 def save_hard_cluster(cluster, savepath):
     result_dict = dict(
-        node_levels=cluster,
+        node_levels=np.array([cluster]),
+        hard_cluster=cluster
     )
-    gut.save_np_dict(result_dict, savepath)
+    fut.save_np_dict(result_dict, savepath)

@@ -24,6 +24,7 @@ import climnet.network.corr_network as cnet
 import climnet.network.es_network as esnet
 import climnet.network.link_bundles as lb
 import geoutils.utils.general_utils as gut
+import geoutils.utils.file_utils as fut
 
 
 PATH = os.path.dirname(os.path.abspath(__file__))
@@ -84,8 +85,8 @@ class Clim_NetworkX:
 
         if M != N:
             raise ValueError("Adjacency must be square!")
-        self.remove_isolated_nodes()
         self.cnx = self.init_cnx()
+        self.remove_isolated_nodes()
         # Check if graph is consistent with network file!
         self.check_network_dim()
         self.get_nx_info()
@@ -94,16 +95,25 @@ class Clim_NetworkX:
 
     def init_cnx(self):
         if self.corr is not None:
+            gut.myprint(
+                f'Init the network by correlation matrix {self.corr.shape}')
             self.weighted = True
             self.corr = np.where(self.adjacency == 1, self.corr, 0)
             # Taking abs to only have positive weights
             cnx = nx.DiGraph(np.abs(self.corr))
             cnx = self.set_edge_corr(cnx)
         else:
+            gut.myprint(
+                f'Init the network by adjacency matrix {self.adjacency.shape}')
             cnx = nx.DiGraph(self.adjacency)
 
         self.cnx = self.post_process_cnx(cnx)
         return self.cnx
+
+    def print_properties(self):
+        print(self.cnx)
+        self.get_nx_info()
+        return None
 
     def post_process_cnx(self, cnx):
         gut.myprint(f'Set dataset attributes to network....')
@@ -148,12 +158,11 @@ class Clim_NetworkX:
         return
 
     def load(self, nx_path_file):
-        gut.myprint(f"Load {nx_path_file}...")
-        self.cnx = nx.read_gml(nx_path_file, destringizer=int)
-        gut.myprint(f"... Loading {nx_path_file} successful!")
+        # Load networkX file
+        self.cnx = fut.load_nx(filepath=nx_path_file)
 
         self.is_degraph()
-        self.adjacency = np.where(nx.to_numpy_array(self.cnx) > 0, 1, 0)
+        self.adjacency = nwf.nx_to_adjacency(graph=self.cnx)
         # self.corr = self.get_attr_array(attr='corr')  # Not all networks have corr
         # if self.adjacency.shape != self.corr.shape:
         #     gut.myprint(self.adjacency.shape, self.corr.shape)
@@ -300,8 +309,6 @@ class Clim_NetworkX:
         self.lb = True
         self.remove_isolated_nodes()
 
-        self.cnx = self.init_cnx()
-
     # ########### General Functions for better handeling networkx ###################
 
     def check_network_dim(self):
@@ -325,7 +332,7 @@ class Clim_NetworkX:
                     f"Different number of edges: graph file: {g_E} vs net file:{ed_num_net}!"
                 )
             else:
-                print("WARNING! Adjacency is undirected and symmetric!")
+                gut.myprint("WARNING! Adjacency is undirected and symmetric!")
 
     def set_corr_edges(self):
         """Setting the edges values to the corresponding correlation values
@@ -338,7 +345,7 @@ class Clim_NetworkX:
             for j in idx_links:
                 val = self.corr[i, j]
                 self.cnx.edges[i, j]["corr"] = float(val)
-        print("Finished setting edge corr values!", flush=True)
+        gut.myprint("Finished setting edge corr values!", flush=True)
 
     def set_weight_edges(self):
         """
@@ -352,7 +359,7 @@ class Clim_NetworkX:
             for j in idx_links:
                 val = self.corr[i, j]
                 self.cnx.edges[i, j]["weight"] = np.abs(float(val))
-        print("Finished setting edge weight values!", flush=True)
+        gut.myprint("Finished setting edge weight values!", flush=True)
 
     def get_sparsity(self):
         """Obtain sparsity of adjacency matrix."""
@@ -451,6 +458,9 @@ class Clim_NetworkX:
         self.is_points = np.append(
             self.is_points, is_points)
         self.set_removed_points()
+        # Re-Initialize the network with the the new adjacency!
+        gut.myprint('Re-Init the new network')
+        self.init_cnx()
 
         return None
 
@@ -491,8 +501,6 @@ class Clim_NetworkX:
         # Remove nodes that are maybe now isolated
         gut.myprint('Remove possibly newly isolated nodes')
         self.remove_isolated_nodes()
-        gut.myprint('Re-Init the new network')
-        self.init_cnx()
         self.check_network_dim()
         gut.myprint('Finished setting up network!')
         self.get_nx_info()
@@ -526,6 +534,15 @@ class Clim_NetworkX:
         if "clustering" in attr:
             if not self.node_attr_exists(attr="clustering") or rc_attr is True:
                 self.cnx = nwf.clustering_coeff(netx=self.cnx)
+
+        if 'transitivity' in attr:
+            # Sets all nodes to the same value!
+            if not self.node_attr_exists(attr="transitivity") or rc_attr is True:
+                self.cnx = nwf.transitivity(netx=self.cnx)
+
+        if 'triangles' in attr:
+            if not self.node_attr_exists(attr="triangles") or rc_attr is True:
+                self.cnx = nwf.triangles(netx=self.cnx)
 
         self.create_ds()
 
@@ -629,7 +646,7 @@ class Clim_NetworkX:
         return np.array(list(self.get_edge_attr_dict(attr).values()))
 
     def get_edge_attr_dict(self, attr):
-        return nx.get_edge_attributes(self.cnx, attr)
+        return nwf.get_edge_attr_dict(graph=self.cnx, attr=attr)
 
     def get_attr_array(self, attr):
         return np.array(nx.attr_matrix(self.cnx, edge_attr=attr))
@@ -685,15 +702,9 @@ class Clim_NetworkX:
         return self.ds_nx
 
     def get_edgelist(self, weighted=False, sort=False):
-        if weighted:
-            # edge_list = nx.get_edge_attributes(self.cnx, 'weight')
-            edge_list = self.get_edge_attr_dict("weight")
-        else:
-            edge_list = self.cnx.edges()
-
-        edge_list = nwf.remove_dublicates_el(np.array(list(edge_list)))
-        if sort:
-            edge_list, _ = nwf.sort_el_lon_lat(el=edge_list, netx=self.cnx)
+        reload(nwf)
+        edge_list = nwf.get_edgelist(
+            net=self.cnx, weighted=weighted, sort=sort)
 
         return edge_list
 
@@ -1299,12 +1310,12 @@ class Clim_NetworkX:
         for attr in edge_attrs:
             if attr not in all_attrs:
                 raise ValueError(f"Edge attribute {attr} does not exist!")
-            print(attr, flush=True)
+            gut.myprint(attr)
             edge_attr = self.get_edge_attr(attr)
             for q in q_values:
-                print(q)
+                gut.myprint(q)
                 q_val = np.quantile(edge_attr, q=q)
-                print(f"Get values {q} <= {q_val}")
+                gut.myprint(f"Get values {q} <= {q_val}")
                 for ne in self.cnx.nodes:
                     node_sum = 0.0
                     node_cnt = 0
@@ -1355,6 +1366,3 @@ class Clim_NetworkX:
     def get_nk_graph(self):
         self.cnk = nk.nxadapter.nx2nk(self.cnx.to_undirected())
         return self.cnk
-
-
-# %%

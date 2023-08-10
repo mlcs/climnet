@@ -72,7 +72,7 @@ class BaseDataset(bds.BaseDataset):
                 raise ValueError(f"File does not exist {data_nc}!")
 
             ds = self.open_ds(
-                nc_file=data_nc,
+                nc_files=data_nc,
                 var_name=var_name,
                 data_nc=data_nc,
                 time_range=time_range,
@@ -83,8 +83,8 @@ class BaseDataset(bds.BaseDataset):
                 **kwargs,
             )
 
-            self.info_dict = kwargs
-
+            # self.info_dict = kwargs
+            self.info_dict = {}
             if timemean is not None:
                 ds = tu.apply_timemean(ds, timemean=timemean)
 
@@ -127,7 +127,7 @@ class BaseDataset(bds.BaseDataset):
         # Compute Anomalies if needed
         self.can = can
         if self.can is True:
-            self.compute_anomalies_ds(kwargs)
+            self.compute_anomalies_ds(**kwargs)
 
         # if load_nc is None:
         #     self.ds = self.ds.assign_coords(
@@ -212,11 +212,13 @@ class BaseDataset(bds.BaseDataset):
             ds = self.check_time(ds)
             self.set_var(ds=ds)
             self.ds = ds
-
+            self.dims = self.get_dims()
             self.init_mask(da=ds[self.var_name], **kwargs)
         return self.ds
 
-    def set_ds_attrs(self, ds):
+    def set_ds_attrs(self, ds=None):
+        if ds is None:
+            ds = self.ds
         param_class = {
             "grid_step": self.grid_step,
             "grid_type": self.grid_type,
@@ -224,25 +226,6 @@ class BaseDataset(bds.BaseDataset):
         }
         ds.attrs = param_class
         return ds
-
-    def save(self, filepath):
-        """Save the dataset class object to file.
-        Args:
-        ----
-        filepath: str
-        """
-        if os.path.exists(filepath):
-            gut.myprint("File" + filepath + " already exists!")
-            os.rename(filepath, filepath + "_backup")
-
-        dirname = os.path.dirname(filepath)
-        if not os.path.exists(dirname):
-            os.makedirs(dirname)
-
-        ds_temp = self.set_ds_attrs(self.ds)
-        ds_temp.to_netcdf(filepath)
-        gut.myprint(f"File {filepath} written!")
-        return None
 
     def preprocess_large_ds(
         self,
@@ -291,7 +274,7 @@ class BaseDataset(bds.BaseDataset):
         self.grid_step = grid_step
         self.grid_type = grid_type
 
-        dist_equator = grid.degree2distance_equator(self.grid_step)
+        dist_equator = sput.degree2distance_equator(self.grid_step)
         sp_grid = kwargs.pop("sp_grid", None)
         gut.myprint(f"Start create grid {grid_type}...")
         if grid_type == "gaussian":
@@ -317,7 +300,7 @@ class BaseDataset(bds.BaseDataset):
 
         max_lon = max_lon if max_lon <= 180 else 180
         min_lon = min_lon if min_lon >= -180 else -180
-        max_lat = max_lat if max_lat >= 90 else 90
+        max_lat = max_lat if max_lat <= 90 else 90
         min_lat = min_lat if min_lat >= -90 else -90
 
         if [min_lon, max_lon] != [-180, 180] or [min_lat, max_lat] != [-90, 90]:
@@ -416,8 +399,9 @@ class BaseDataset(bds.BaseDataset):
             self.ds.loc[dict(points=points)] = -999
             self.ds = xr.where(self.ds == -999, np. nan, self.ds)
             gut.myprint(f'Deleted {len(points)} points from dataset...')
-
             self.init_map_indices()
+            self.ds = self.set_ds_attrs()
+            self.set_source_attrs()
         return
 
     def mask_node_ids(self, idx_list):
@@ -432,25 +416,6 @@ class BaseDataset(bds.BaseDataset):
             points = self.get_points_for_idx(idx_list)
             self.mask_point_ids(points=points)
         return
-
-    def get_points_for_idx(self, idx_lst):
-        """Returns the point number of the map for a given index list.
-        Important eg. to transform node ids to points of the network
-        Args:
-            idx_lst (list): list of indices of the network.
-
-        Returns:
-            np.array: array of the points of the index list
-        """
-        point_lst = []
-
-        for idx in idx_lst:
-            # map_idx = self.get_map_index(idx)
-            # point = int(map_idx["point"])
-            # point_lst.append(point)
-            point_lst.append(self.key_val_idx_point_dict[idx])
-
-        return np.array(point_lst, dtype=int)
 
     def get_idx_for_point(self, point):
         """Gets for a point its corresponding indices
@@ -476,29 +441,6 @@ class BaseDataset(bds.BaseDataset):
             idx_lst.append(self.get_idx_for_point(point=point))
 
         return np.array(idx_lst, dtype=int)
-
-    def get_coordinates_flatten(self):
-        """Get coordinates of flatten array with removed NaNs.
-
-        Return:
-        -------
-        coord_deg:
-        coord_rad:
-        map_idx:
-        """
-        # length of the flatten array with NaNs removed
-        # length = self.flatten_array().shape[1]
-        length = len(self.indices_flat)
-        coord_deg = []
-        map_idx = []
-        for i in range(length):
-            buff = self.get_map_index(i)
-            coord_deg.append([buff["lat"], buff["lon"]])
-            map_idx.append(buff["point"])
-
-        coord_rad = np.radians(coord_deg)  # transforms to np.array
-
-        return np.array(coord_deg), coord_rad, np.array(map_idx)
 
     def count_indices_to_array(self, idx_list):
         """

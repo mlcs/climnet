@@ -7,7 +7,7 @@ Class for network of rainfall events
 """
 # %%
 from climnet.community_detection.graph_tool.compare_runs import Compare_Runs
-import climnet.tsa.event_synchronization as es
+import geoutils.tsa.event_synchronization as es
 import sys
 import os
 import numpy as np
@@ -67,8 +67,6 @@ class Analyse_Network(Compare_Runs):
             print('Compute additionally Anomalies...!')
             if 'an' not in self.vars:
                 self.ds['an'] = self.compute_anomalies(self.ds[self.var_name])
-
-
 
     def get_density_map_loc_arr(self, loc_arr, num_runs=30, den_th=0.8,  abs_th=4, rel_th=0,
                                 plot=False, projection='Mollweide', savepath=None, ax=None, title=None, graph_folder=None,
